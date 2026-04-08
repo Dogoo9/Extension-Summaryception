@@ -378,39 +378,32 @@ async function maybeSummarizeTurns() {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
 
-    // Get ALL assistant turns (including ones we've already ghosted)
+    // Get all assistant turns (including ghosted ones we tagged)
     const allAssistantTurns = getAssistantTurns(chat);
 
-    // Get only the ones still visible to LLM
-    const visibleAssistantTurns = getVisibleAssistantTurns(chat);
+    // Get only the ones NOT yet ghosted (still visible to LLM)
+    const visibleTurns = allAssistantTurns.filter(t => !chat[t.index]._sc_ghosted);
 
-    log(`Visible assistant turns: ${visibleAssistantTurns.length}, limit: ${s.verbatimTurns}`);
+    log(`Visible assistant turns: ${visibleTurns.length}, limit: ${s.verbatimTurns}`);
 
-    if (visibleAssistantTurns.length <= s.verbatimTurns) return;
+    // Only trigger when we exceed the limit
+    if (visibleTurns.length <= s.verbatimTurns) return;
 
-    // Find turns that haven't been summarized yet (beyond summarizedUpTo)
-    const unsummarized = allAssistantTurns.filter(t => t.index > store.summarizedUpTo);
-    const unsummarizedVisible = unsummarized.filter(t => {
-        const msg = chat[t.index];
-        return !msg.is_system || msg._sc_ghosted; // not yet ghosted
-    }).filter(t => !chat[t.index]._sc_ghosted); // truly visible
-
-    if (unsummarizedVisible.length <= s.verbatimTurns) {
-        log('All overflow already summarized and ghosted.');
-        return;
-    }
-
-    const overflow = unsummarizedVisible.length - s.verbatimTurns;
-    const batchSize = Math.min(overflow, s.turnsPerSummary);
-    const batch = unsummarizedVisible.slice(0, batchSize);
+    // *** KEY FIX: Always take a full batch of turnsPerSummary from the oldest visible ***
+    // This way if turnsPerSummary=3 and we have 8 visible (limit 7), we summarize
+    // the 3 oldest → leaving 5 visible, well under the limit.
+    const batchSize = Math.min(s.turnsPerSummary, visibleTurns.length);
+    const batch = visibleTurns.slice(0, batchSize);
 
     if (batch.length === 0) return;
 
+    // Find the full range in the chat array (including user messages between them)
     const startIdx = batch[0].index;
     const endIdx = batch[batch.length - 1].index;
 
-    log(`Summarizing turns at indices ${startIdx}–${endIdx} (${batch.length} assistant turns)`);
+    log(`Summarizing ${batch.length} assistant turns (indices ${startIdx}–${endIdx})`);
 
+    // Build the passage — includes user + assistant messages in that range for context
     const storyTxt = buildPassageFromRange(chat, startIdx, endIdx);
     if (!storyTxt.trim()) return;
 
@@ -435,7 +428,7 @@ async function maybeSummarizeTurns() {
 
     store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
 
-    // *** GHOST the summarized messages instead of removing them ***
+    // Ghost the summarized messages (and any user messages in between)
     ghostMessagesUpTo(endIdx);
 
     log(`Layer 0 now has ${store.layers[0].length} snippets`);
@@ -446,17 +439,21 @@ async function maybeSummarizeTurns() {
     await saveChatStore();
 
     // Save the chat to persist the ghosted state
-    const { saveChat } = SillyTavern.getContext();
-    if (typeof saveChat === 'function') {
-        // Use the conditional save from context
+    try {
         const ctx = SillyTavern.getContext();
         if (ctx.saveChat) await ctx.saveChat();
+    } catch (e) {
+        log('Could not save chat:', e);
     }
 
     toastr.success(`Summary saved (Layer 0: ${store.layers[0].length} snippets)`, 'Summaryception', { timeOut: 2000 });
 
-    // Recurse if there's still overflow
-    await maybeSummarizeTurns();
+    // Check if there's STILL overflow (e.g. if many turns accumulated)
+    const remainingVisible = allAssistantTurns.filter(t => !chat[t.index]._sc_ghosted).length;
+    if (remainingVisible > s.verbatimTurns) {
+        log(`Still ${remainingVisible} visible turns (limit ${s.verbatimTurns}), running again…`);
+        await maybeSummarizeTurns();
+    }
 }
 
 // ─── Core: Layer Promotion ("ception") ──────────────────────────────
