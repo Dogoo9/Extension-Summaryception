@@ -378,36 +378,28 @@ async function maybeSummarizeTurns() {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
 
-    // Get all assistant turns (including ghosted ones we tagged)
     const allAssistantTurns = getAssistantTurns(chat);
 
-    // Get only the ones NOT yet ghosted (still visible to LLM)
-    const visibleTurns = allAssistantTurns.filter(t => !chat[t.index]._sc_ghosted);
+    // Get visible turns, EXCLUDING index 0 (greeting/scenario — user manages that manually)
+    const visibleTurns = allAssistantTurns.filter(t => t.index > 0 && !chat[t.index]._sc_ghosted);
 
-    log(`Visible assistant turns: ${visibleTurns.length}, limit: ${s.verbatimTurns}`);
+    log(`Visible assistant turns (excluding turn 0): ${visibleTurns.length}, limit: ${s.verbatimTurns}`);
 
-    // Only trigger when we exceed the limit
     if (visibleTurns.length <= s.verbatimTurns) return;
 
-    // *** KEY FIX: Always take a full batch of turnsPerSummary from the oldest visible ***
-    // This way if turnsPerSummary=3 and we have 8 visible (limit 7), we summarize
-    // the 3 oldest → leaving 5 visible, well under the limit.
     const batchSize = Math.min(s.turnsPerSummary, visibleTurns.length);
     const batch = visibleTurns.slice(0, batchSize);
 
     if (batch.length === 0) return;
 
-    // Find the full range in the chat array (including user messages between them)
     const startIdx = batch[0].index;
     const endIdx = batch[batch.length - 1].index;
 
     log(`Summarizing ${batch.length} assistant turns (indices ${startIdx}–${endIdx})`);
 
-    // Build the passage — includes user + assistant messages in that range for context
     const storyTxt = buildPassageFromRange(chat, startIdx, endIdx);
     if (!storyTxt.trim()) return;
 
-    // Build prior_context from Layer 0's existing snippets
     if (!store.layers[0]) store.layers[0] = [];
     const contextStr = store.layers[0].map(sn => sn.text).join(' | ');
 
@@ -419,7 +411,6 @@ async function maybeSummarizeTurns() {
     const summary = await callSummarizer(storyTxt, contextStr);
     if (!summary) return;
 
-    // Store the snippet
     store.layers[0].push({
         text: summary,
         turnRange: [startIdx, endIdx],
@@ -428,17 +419,14 @@ async function maybeSummarizeTurns() {
 
     store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
 
-    // Ghost the summarized messages (and any user messages in between)
+    // Ghost the summarized messages (ghostMessagesUpTo already skips index 0)
     ghostMessagesUpTo(endIdx);
 
     log(`Layer 0 now has ${store.layers[0].length} snippets`);
 
-    // Check for layer promotion
     await maybePromoteLayer(0);
-
     await saveChatStore();
 
-    // Save the chat to persist the ghosted state
     try {
         const ctx = SillyTavern.getContext();
         if (ctx.saveChat) await ctx.saveChat();
@@ -448,8 +436,8 @@ async function maybeSummarizeTurns() {
 
     toastr.success(`Summary saved (Layer 0: ${store.layers[0].length} snippets)`, 'Summaryception', { timeOut: 2000 });
 
-    // Check if there's STILL overflow (e.g. if many turns accumulated)
-    const remainingVisible = allAssistantTurns.filter(t => !chat[t.index]._sc_ghosted).length;
+    // Check if still over the limit
+    const remainingVisible = allAssistantTurns.filter(t => t.index > 0 && !chat[t.index]._sc_ghosted).length;
     if (remainingVisible > s.verbatimTurns) {
         log(`Still ${remainingVisible} visible turns (limit ${s.verbatimTurns}), running again…`);
         await maybeSummarizeTurns();
