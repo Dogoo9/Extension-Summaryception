@@ -1187,9 +1187,30 @@ function bindUIEvents() {
             toastr.warning('Enable Summaryception first.');
             return;
         }
+        if (isSummarizing) {
+            toastr.warning('Already summarizing. Please wait.');
+            return;
+        }
         $(this).prop('disabled', true).text(' Working…');
         try {
-            await maybeSummarizeTurns();
+            // Reset catchup dismissed so dialog can show
+            catchupDismissed = false;
+
+            // Force: bypass normal trigger, directly check and process
+            const { chat } = SillyTavern.getContext();
+            const allAssistantTurns = getAssistantTurns(chat);
+            const visibleTurns = allAssistantTurns.filter(t => t.index > 0 && !chat[t.index].extra?.sc_ghosted);
+
+            if (visibleTurns.length <= s.verbatimTurns) {
+                toastr.info('Nothing to summarize — visible turns are within the verbatim limit.', 'Summaryception');
+                return;
+            }
+
+            const overflow = visibleTurns.length - s.verbatimTurns;
+            toastr.info(`${overflow} turns to process. Starting...`, 'Summaryception', { timeOut: 2000 });
+
+            // Run catchup directly
+            await runCatchup(visibleTurns, overflow);
             updateInjection();
         } finally {
             $(this).prop('disabled', false).html('<i class="fa-solid fa-bolt"></i> Force Summarize Now');
