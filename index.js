@@ -136,42 +136,146 @@ function getPlayerName() {
 
 // ─── Message Hiding (Ghosting) ───────────────────────────────────────
 
-function hideMessage(messageIndex) {
+/**
+ * Get the IGNORE symbol from SillyTavern core.
+ * This is the official way to exclude messages from the LLM context
+ * without removing them from the chat. Uses Symbol.for() so it won't
+ * serialize to JSON (ephemeral per session).
+ *
+ * From PR #3763: generation interceptors set this flag on structuredClone'd
+ * messages to exclude them from formatMessageHistoryItem() and
+ * setOpenAIMessages().
+ *
+ * HOWEVER — we need persistent ghosting (survives reload), so we use a
+ * two-pronged approach:
+ *   1. Set a persistent flag (msg.extra.sc_ghosted = true) saved to chat
+ *   2. At generation time, use a generation interceptor to apply the
+ *      Symbol-based ignore flag on cloned messages
+ */
+
+/**
+ * Mark a message as ghosted in persistent storage.
+ * The actual context exclusion happens in the generation interceptor.
+ */
+function ghostMessage(messageIndex) {
     const { chat } = SillyTavern.getContext();
     const msg = chat[messageIndex];
     if (!msg) return;
-    if (msg.is_system) return;
-    msg.is_system = true;
+
+    // Initialize extra if needed
+    if (!msg.extra) msg.extra = {};
+
+    // Already ghosted
+    if (msg.extra.sc_ghosted) return;
+
+    // Set persistent flag
+    msg.extra.sc_ghosted = true;
+
+    // Visual indicator in the UI
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageIndex}"]`);
     if (messageElement) {
-        messageElement.setAttribute('is_system', 'true');
+        messageElement.classList.add('sc-ghosted');
     }
-    log(`Hidden (ghosted) message at index ${messageIndex}`);
+
+    log(`Ghosted message at index ${messageIndex}`);
 }
 
-function unhideMessage(messageIndex) {
+/**
+ * Remove ghost status from a message.
+ */
+function unghostMessage(messageIndex) {
     const { chat } = SillyTavern.getContext();
     const msg = chat[messageIndex];
-    if (!msg) return;
-    msg.is_system = false;
+    if (!msg || !msg.extra) return;
+
+    delete msg.extra.sc_ghosted;
+
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageIndex}"]`);
     if (messageElement) {
-        messageElement.setAttribute('is_system', 'false');
+        messageElement.classList.remove('sc-ghosted');
     }
-    log(`Unhidden message at index ${messageIndex}`);
+
+    log(`Unghosted message at index ${messageIndex}`);
 }
 
+/**
+ * Ghost all messages from index 1 up to and including endIndex.
+ * Skips index 0 (greeting/scenario) and already-ghosted messages.
+ */
 function ghostMessagesUpTo(endIndex) {
     const { chat } = SillyTavern.getContext();
+
     for (let i = 0; i <= endIndex; i++) {
         const msg = chat[i];
         if (!msg) continue;
+
+        // Skip the first message (greeting)
         if (i === 0) continue;
-        if (msg.is_system && !msg._sc_ghosted) continue;
-        msg._sc_ghosted = true;
-        hideMessage(i);
+
+        // Skip real system messages that aren't ours
+        if (msg.is_system && !msg.extra?.sc_ghosted) continue;
+
+        ghostMessage(i);
     }
+
     log(`Ghosted messages from index 1 to ${endIndex}`);
+}
+
+/**
+ * Apply ghost visual indicators to all ghosted messages in the current chat.
+ * Called on chat load to restore visual state.
+ */
+function applyGhostVisuals() {
+    const { chat } = SillyTavern.getContext();
+    if (!chat) return;
+
+    for (let i = 0; i < chat.length; i++) {
+        if (chat[i]?.extra?.sc_ghosted) {
+            const messageElement = document.querySelector(`#chat .mes[mesid="${i}"]`);
+            if (messageElement) {
+                messageElement.classList.add('sc-ghosted');
+            }
+        }
+    }
+}
+
+// ─── Generation Interceptor (the actual context exclusion) ───────────
+
+/**
+ * This is where ghosted messages are ACTUALLY excluded from context.
+ * We hook into the generation pipeline and set the ignore flag on
+ * cloned messages so they're skipped during prompt building.
+ *
+ * This uses the official SillyTavern mechanism from PR #3763.
+ */
+function setupGenerationInterceptor() {
+    const { eventSource, event_types } = SillyTavern.getContext();
+
+    eventSource.on(event_types.GENERATION_STARTED, (type) => {
+        if (type === 'quiet') return; // Don't interfere with our own summarizer calls
+
+        const s = getSettings();
+        if (!s.enabled) return;
+
+        const { chat } = SillyTavern.getContext();
+
+        // Get the ignore symbol from SillyTavern core
+        const ctx = SillyTavern.getContext();
+        const IGNORE_SYMBOL = ctx.symbols?.IGNORE
+        || Symbol.for('ignore');  // Fallback
+
+        for (let i = 0; i < chat.length; i++) {
+            const msg = chat[i];
+            if (msg?.extra?.sc_ghosted) {
+                // Clone the message to avoid persisting the symbol
+                chat[i] = structuredClone(msg);
+                if (!chat[i].extra) chat[i].extra = {};
+                chat[i].extra[IGNORE_SYMBOL] = true;
+            }
+        }
+
+        log('Generation interceptor: applied ignore flags to ghosted messages');
+    });
 }
 
 // ─── Assistant Turn Utilities ────────────────────────────────────────
@@ -180,7 +284,7 @@ function getAssistantTurns(chat) {
     const turns = [];
     for (let i = 0; i < chat.length; i++) {
         const m = chat[i];
-        const isOurGhost = m._sc_ghosted === true;
+        const isOurGhost = m.extra?.sc_ghosted === true;
         const isAssistant = !m.is_user && (!m.is_system || isOurGhost);
         if (isAssistant && m.mes && m.mes.trim().length > 0) {
             turns.push({ index: i, mes: m.mes, name: m.name || 'Assistant' });
@@ -193,7 +297,7 @@ function getVisibleAssistantTurns(chat) {
     const turns = [];
     for (let i = 0; i < chat.length; i++) {
         const m = chat[i];
-        if (!m.is_user && !m.is_system && m.mes && m.mes.trim().length > 0) {
+        if (!m.is_user && !m.is_system && !m.extra?.sc_ghosted && m.mes && m.mes.trim().length > 0) {
             turns.push({ index: i, mes: m.mes, name: m.name || 'Assistant' });
         }
     }
@@ -394,7 +498,7 @@ async function maybeSummarizeTurns() {
     const store = getChatStore();
 
     const allAssistantTurns = getAssistantTurns(chat);
-    const visibleTurns = allAssistantTurns.filter(t => t.index > 0 && !chat[t.index]._sc_ghosted);
+    const visibleTurns = allAssistantTurns.filter(t => t.index > 0 && !chat[t.index].extra?.sc_ghosted);
 
     log(`Visible assistant turns (excluding turn 0): ${visibleTurns.length}, limit: ${s.verbatimTurns}`);
 
@@ -438,7 +542,7 @@ async function maybeSummarizeTurns() {
     await summarizeOneBatch(visibleTurns);
 
     // Check if there's still a small overflow (not a backlog)
-    const remaining = getAssistantTurns(chat).filter(t => t.index > 0 && !chat[t.index]._sc_ghosted);
+    const remaining = getAssistantTurns(chat).filter(t => t.index > 0 && !chat[t.index].extra?.sc_ghosted);
     if (remaining.length > s.verbatimTurns && remaining.length - s.verbatimTurns <= backlogThreshold) {
         await maybeSummarizeTurns();
     }
@@ -872,6 +976,7 @@ function onChatChanged() {
     log('Chat changed.');
     catchupDismissed = false;
     setTimeout(() => {
+        applyGhostVisuals();
         updateInjection();
         updateUI();
     }, 100);
@@ -917,9 +1022,8 @@ function registerSlashCommands() {
                 const store = getChatStore();
                 const { chat } = SillyTavern.getContext();
                 for (let i = 0; i < chat.length; i++) {
-                    if (chat[i]._sc_ghosted) {
-                        unhideMessage(i);
-                        delete chat[i]._sc_ghosted;
+                    if (chat[i]?.extra?.sc_ghosted) {
+                        unghostMessage(i);
                     }
                 }
                 store.layers = [];
@@ -969,7 +1073,7 @@ function updateUI() {
     let ghostedCount = 0;
     try {
         const { chat } = SillyTavern.getContext();
-        ghostedCount = chat.filter(m => m._sc_ghosted).length;
+        ghostedCount = chat.filter(m => m.extra?.sc_ghosted).length;
     } catch (e) { /* no chat loaded */ }
 
     let statsHtml = '';
@@ -1193,6 +1297,9 @@ function bindUIEvents() {
     eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
     eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
+
+    // In the init function, add after bindUIEvents():
+    setupGenerationInterceptor();
 
     registerSlashCommands();
 
