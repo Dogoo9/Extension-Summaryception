@@ -131,136 +131,44 @@ function getPlayerName() {
 
 // ─── Message Hiding (Ghosting) ───────────────────────────────────────
 
-/**
- * Ghost a message: mark it for context exclusion.
- * We ONLY set extra.sc_ghosted (persistent tracking + CSS visual).
- * The actual context exclusion happens in the generation interceptor
- * using Symbol.for('ignore') on structuredClone'd messages.
- *
- * We never touch is_system, is_hidden, or any other ST rendering flag.
- */
-function ghostMessage(messageIndex) {
+async function ghostMessage(messageIndex) {
     const { chat } = SillyTavern.getContext();
     const msg = chat[messageIndex];
     if (!msg) return;
     if (!msg.extra) msg.extra = {};
     if (msg.extra.sc_ghosted) return;
 
+    // Track that WE ghosted this
     msg.extra.sc_ghosted = true;
 
-    const messageElement = document.querySelector(`#chat .mes[mesid="${messageIndex}"]`);
-    if (messageElement) {
-        messageElement.classList.add('sc-ghosted');
-    }
+    // Use SillyTavern's native hide
+    await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${messageIndex}`);
 
     log(`Ghosted message at index ${messageIndex}`);
 }
 
-function unghostMessage(messageIndex) {
+async function unghostMessage(messageIndex) {
     const { chat } = SillyTavern.getContext();
     const msg = chat[messageIndex];
     if (!msg) return;
     if (msg.extra) delete msg.extra.sc_ghosted;
 
-    const messageElement = document.querySelector(`#chat .mes[mesid="${messageIndex}"]`);
-    if (messageElement) {
-        messageElement.classList.remove('sc-ghosted');
-    }
+    // Use SillyTavern's native unhide
+    await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${messageIndex}`);
 
     log(`Unghosted message at index ${messageIndex}`);
 }
 
-function ghostMessagesUpTo(endIndex) {
+async function ghostMessagesUpTo(endIndex) {
     const { chat } = SillyTavern.getContext();
     for (let i = 0; i <= endIndex; i++) {
         const msg = chat[i];
         if (!msg) continue;
         if (i === 0) continue;
         if (msg.is_system && !msg.extra?.sc_ghosted) continue;
-        ghostMessage(i);
+        await ghostMessage(i);
     }
     log(`Ghosted messages from index 1 to ${endIndex}`);
-}
-
-function applyGhostVisuals() {
-    try {
-        const { chat } = SillyTavern.getContext();
-        if (!chat) return;
-        for (let i = 0; i < chat.length; i++) {
-            const isGhosted = chat[i]?.extra?.sc_ghosted === true;
-            const messageElement = document.querySelector(`#chat .mes[mesid="${i}"]`);
-            if (!messageElement) continue;
-            if (isGhosted) {
-                messageElement.classList.add('sc-ghosted');
-            } else {
-                messageElement.classList.remove('sc-ghosted');
-            }
-        }
-    } catch (e) {
-        log('applyGhostVisuals error:', e);
-    }
-}
-
-function setupGhostObserver() {
-    const chatContainer = document.querySelector('#chat');
-    if (!chatContainer) {
-        setTimeout(setupGhostObserver, 500);
-        return;
-    }
-    const observer = new MutationObserver((mutations) => {
-        let hasNewMessages = false;
-        for (const mutation of mutations) {
-            if (mutation.addedNodes.length > 0) {
-                hasNewMessages = true;
-                break;
-            }
-        }
-        if (hasNewMessages) {
-            applyGhostVisuals();
-        }
-    });
-    observer.observe(chatContainer, { childList: true, subtree: false });
-    log('Ghost visual observer attached to #chat');
-}
-
-// ─── Generation Interceptor ─────────────────────────────────────────
-
-/**
- * The OFFICIAL way to exclude messages from context (PR #3763).
- * Uses Symbol.for('ignore') on structuredClone'd messages.
- * The symbol never persists to JSON, never affects rendering.
- */
-function setupGenerationInterceptor() {
-    const { eventSource, event_types } = SillyTavern.getContext();
-
-    eventSource.on(event_types.GENERATION_STARTED, (type) => {
-        if (type === 'quiet') return;
-
-        const s = getSettings();
-        if (!s.enabled) return;
-
-        const { chat } = SillyTavern.getContext();
-
-        // Get the ignore symbol — either from ST context or create it
-        let IGNORE_SYMBOL;
-        try {
-            const ctx = SillyTavern.getContext();
-            IGNORE_SYMBOL = ctx.symbols?.IGNORE || Symbol.for('ignore');
-        } catch (e) {
-            IGNORE_SYMBOL = Symbol.for('ignore');
-        }
-
-        for (let i = 0; i < chat.length; i++) {
-            if (chat[i]?.extra?.sc_ghosted) {
-                // structuredClone to avoid persisting the symbol
-                chat[i] = structuredClone(chat[i]);
-                if (!chat[i].extra) chat[i].extra = {};
-                chat[i].extra[IGNORE_SYMBOL] = true;
-            }
-        }
-
-        log('Generation interceptor: applied ignore symbol to ghosted messages');
-    });
 }
 
 // ─── Assistant Turn Utilities ────────────────────────────────────────
