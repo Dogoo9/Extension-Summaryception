@@ -177,21 +177,23 @@ async function ghostMessagesUpTo(endIndex) {
 async function unghostAllMessages() {
     const { chat } = SillyTavern.getContext();
 
-    let minIdx = -1;
-    let maxIdx = -1;
+    // Clear our tracking flags
     for (let i = 0; i < chat.length; i++) {
         if (chat[i]?.extra?.sc_ghosted) {
-            if (minIdx === -1) minIdx = i;
-            maxIdx = i;
             delete chat[i].extra.sc_ghosted;
         }
     }
 
-    if (minIdx === -1) return;
+    // Unhide ALL messages — /unhide on non-hidden messages is harmless
+    for (let i = 0; i < chat.length; i++) {
+        try {
+            await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${i}`);
+        } catch (e) {
+            log(`Failed to unhide message ${i}:`, e);
+        }
+    }
 
-    await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${minIdx}-${maxIdx}`);
-
-    log(`Unghosted all messages from ${minIdx} to ${maxIdx}`);
+    log(`Unghosted all ${chat.length} messages`);
 }
 
 // ─── Assistant Turn Utilities ────────────────────────────────────────
