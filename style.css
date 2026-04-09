@@ -9,6 +9,12 @@
     margin-bottom: 4px;
 }
 
+.sc-settings .sc-row label.checkbox_label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .sc-settings .sc-hint {
     display: block;
     font-size: 0.8em;
