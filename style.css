@@ -277,6 +277,8 @@
 /* ─── Snippet Editing ─────────────────────────────────────────── */
 
 .sc-snippet-text {
+    flex: 1;
+    word-break: break-word;
     cursor: pointer;
 }
 
@@ -298,4 +300,110 @@
     border: 1px solid var(--SmartThemeQuoteColor, #43b581);
     border-radius: 4px;
     outline: none;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Summaryception — Connection Settings Styles
+ *  ═══════════════════════════════════════════════════════════ */
+
+.summaryception-connection-section {
+    margin-top: 8px;
+}
+
+.summaryception-section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: bold;
+    margin-bottom: 6px;
+    color: var(--SmartThemeBodyColor);
+}
+
+.summaryception-section-header .fa-bolt {
+    color: #f0c040;
+}
+
+.summaryception-help-text {
+    display: block;
+    margin-bottom: 10px;
+    opacity: 0.7;
+    line-height: 1.4;
+}
+
+.summaryception-setting-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+.summaryception-setting-row label {
+    font-size: 0.9em;
+    font-weight: 600;
+    opacity: 0.85;
+}
+
+.summaryception-input-group {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+
+.summaryception-input-group select {
+    flex: 1;
+}
+
+.summaryception-sub-panel {
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.1));
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.1);
+}
+
+.summaryception-note {
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+    margin-top: 4px;
+    padding: 4px 0;
+    opacity: 0.65;
+}
+
+.summaryception-note .fa-info-circle {
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+
+.summaryception-note small {
+    line-height: 1.35;
+}
+
+.summaryception-note code {
+    font-size: 0.85em;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.summaryception-connection-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    margin-top: 4px;
+    border-radius: 4px;
+    font-size: 0.85em;
+}
+
+.summaryception-connection-status.success {
+    color: #4caf50;
+}
+
+.summaryception-connection-status.error {
+    color: #f44336;
+}
+
+.summaryception-connection-status.loading {
+    color: #ff9800;
 }

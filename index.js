@@ -1,5 +1,5 @@
 /**
- * Summaryception v4.0 — Layered Recursive Summarization for SillyTavern
+ * Summaryception v5.0 — Layered Recursive Summarization for SillyTavern
  *
  * NON-DESTRUCTIVE: Uses SillyTavern's native /hide and /unhide commands
  * to exclude summarized messages from LLM context while keeping them
@@ -7,6 +7,15 @@
  *
  * AGPL-3.0
  */
+
+// ─── Imports ─────────────────────────────────────────────────────────
+import {
+    sendSummarizerRequest,
+    fetchOllamaModels,
+    testOpenAIConnection,
+    populateProfileDropdown,
+    getConnectionDisplayName,
+} from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
@@ -45,6 +54,16 @@ const defaultSettings = Object.freeze({
     ],
 
     debugMode: false,
+
+    // ─── Connection Settings ─────────────────────────────────────
+    connectionSource: 'default',          // 'default' | 'profile' | 'ollama' | 'openai'
+    connectionProfileId: '',              // ID of selected ST Connection Profile
+    ollamaUrl: 'http://localhost:11434',
+    ollamaModel: '',
+    ollamaModelsCache: [],                // Cached model list from Ollama
+    openaiUrl: '',
+    openaiKey: '',
+    openaiModel: '',
 });
 
 // ─── Retry Configuration ─────────────────────────────────────────────
@@ -401,7 +420,6 @@ function cleanSummarizerOutput(raw) {
 // ─── Core: LLM Summarization with Retry ──────────────────────────────
 
 async function callSummarizer(storyTxt, contextStr) {
-    const { generateRaw } = SillyTavern.getContext();
     const s = getSettings();
 
     const prompt = s.summarizerUserPrompt
@@ -413,8 +431,11 @@ async function callSummarizer(storyTxt, contextStr) {
     log('Context str length:', contextStr.length, 'chars');
     log('Story txt length:', storyTxt.length, 'chars');
 
-    const snapshot = snapshotPromptToggles();
-    disableAllPromptToggles();
+    // Only snapshot/restore prompt toggles for 'default' mode
+    // (other modes bypass ST's prompt pipeline entirely)
+    const isDefaultMode = !s.connectionSource || s.connectionSource === 'default';
+    const snapshot = isDefaultMode ? snapshotPromptToggles() : null;
+    if (isDefaultMode) disableAllPromptToggles();
 
     let lastError = null;
 
@@ -425,10 +446,12 @@ async function callSummarizer(storyTxt, contextStr) {
                     log(`Retry attempt ${attempt}/${RETRY_CONFIG.maxRetries}`);
                 }
 
-                const result = await generateRaw({
-                    systemPrompt: s.summarizerSystemPrompt,
-                    prompt: prompt,
-                });
+                // ─── THIS IS THE KEY CHANGE ───
+                const result = await sendSummarizerRequest(
+                    s,                          // full settings object
+                    s.summarizerSystemPrompt,    // system prompt
+                    prompt                       // user prompt
+                );
 
                 let trimmed = (result || '').trim();
 
@@ -492,7 +515,9 @@ async function callSummarizer(storyTxt, contextStr) {
         return '';
 
     } finally {
-        restorePromptToggles(snapshot);
+        if (isDefaultMode && snapshot) {
+            restorePromptToggles(snapshot);
+        }
     }
 }
 
@@ -1476,6 +1501,257 @@ function bindUIEvents() {
     });
 }
 
+// ─── Connection Settings UI ──────────────────────────────────────────
+
+function initConnectionUI() {
+    const s = () => getSettings();
+    const save = () => saveSettings();
+
+    // ── Source dropdown ──
+    const sourceSelect = document.getElementById('summaryception_connection_source');
+    if (sourceSelect) {
+        sourceSelect.value = s().connectionSource || 'default';
+        sourceSelect.addEventListener('change', () => {
+            s().connectionSource = sourceSelect.value;
+            save();
+            updateConnectionSubPanels(sourceSelect.value);
+        });
+    }
+
+    // ── Connection Profile dropdown ──
+    const profileSelect = document.getElementById('summaryception_connection_profile');
+    if (profileSelect) {
+        const populated = populateProfileDropdown(profileSelect, s().connectionProfileId);
+        if (!populated) {
+            fetchProfilesFallback(profileSelect, s().connectionProfileId);
+        }
+        profileSelect.addEventListener('change', () => {
+            s().connectionProfileId = profileSelect.value;
+            save();
+        });
+    }
+
+    // ── Ollama URL ──
+    const ollamaUrl = document.getElementById('summaryception_ollama_url');
+    if (ollamaUrl) {
+        ollamaUrl.value = s().ollamaUrl || 'http://localhost:11434';
+        ollamaUrl.addEventListener('input', () => {
+            s().ollamaUrl = ollamaUrl.value.trim();
+            save();
+        });
+    }
+
+    // ── Ollama Model dropdown ──
+    const ollamaModel = document.getElementById('summaryception_ollama_model');
+    if (ollamaModel) {
+        populateOllamaModelDropdown(ollamaModel, s().ollamaModelsCache || [], s().ollamaModel);
+        ollamaModel.addEventListener('change', () => {
+            s().ollamaModel = ollamaModel.value;
+            save();
+        });
+    }
+
+    // ── Ollama Refresh button ──
+    const ollamaRefresh = document.getElementById('summaryception_ollama_refresh');
+    if (ollamaRefresh) {
+        ollamaRefresh.addEventListener('click', async () => {
+            await refreshOllamaModels();
+        });
+    }
+
+    // ── OpenAI URL ──
+    const openaiUrl = document.getElementById('summaryception_openai_url');
+    if (openaiUrl) {
+        openaiUrl.value = s().openaiUrl || '';
+        openaiUrl.addEventListener('input', () => {
+            s().openaiUrl = openaiUrl.value.trim();
+            save();
+        });
+    }
+
+    // ── OpenAI Key ──
+    const openaiKey = document.getElementById('summaryception_openai_key');
+    if (openaiKey) {
+        openaiKey.value = s().openaiKey || '';
+        openaiKey.addEventListener('input', () => {
+            s().openaiKey = openaiKey.value.trim();
+            save();
+        });
+    }
+
+    // ── OpenAI Model ──
+    const openaiModel = document.getElementById('summaryception_openai_model');
+    if (openaiModel) {
+        openaiModel.value = s().openaiModel || '';
+        openaiModel.addEventListener('input', () => {
+            s().openaiModel = openaiModel.value.trim();
+            save();
+        });
+    }
+
+    // ── OpenAI Test button ──
+    const openaiTest = document.getElementById('summaryception_openai_test');
+    if (openaiTest) {
+        openaiTest.addEventListener('click', async () => {
+            await testOpenAIConnectionHandler();
+        });
+    }
+
+    // Set initial visibility
+    updateConnectionSubPanels(s().connectionSource || 'default');
+}
+
+function updateConnectionSubPanels(source) {
+    const panels = {
+        profile: document.getElementById('summaryception_profile_settings'),
+        ollama: document.getElementById('summaryception_ollama_settings'),
+        openai: document.getElementById('summaryception_openai_settings'),
+    };
+
+    Object.values(panels).forEach(panel => {
+        if (panel) panel.style.display = 'none';
+    });
+
+        if (panels[source]) {
+            panels[source].style.display = 'block';
+        }
+}
+
+function populateOllamaModelDropdown(selectElement, models, currentValue) {
+    selectElement.innerHTML = '<option value="">-- Select Model --</option>';
+
+    if (models && models.length > 0) {
+        for (const model of models) {
+            const opt = document.createElement('option');
+            opt.value = model.name || model;
+            opt.textContent = model.name || model;
+            selectElement.appendChild(opt);
+        }
+    }
+
+    if (currentValue) {
+        selectElement.value = currentValue;
+    }
+}
+
+async function refreshOllamaModels() {
+    const s = getSettings();
+    const ollamaUrl = s.ollamaUrl || 'http://localhost:11434';
+    const modelSelect = document.getElementById('summaryception_ollama_model');
+
+    showConnectionStatus('loading', 'Fetching Ollama models...');
+
+    try {
+        const models = await fetchOllamaModels(ollamaUrl);
+        s.ollamaModelsCache = models.map(m => ({ name: m.name }));
+        saveSettings();
+
+        if (modelSelect) {
+            populateOllamaModelDropdown(modelSelect, models, s.ollamaModel);
+        }
+
+        showConnectionStatus('success', `Found ${models.length} model(s)`);
+        toastr.success(`Found ${models.length} Ollama model(s)`, 'Summaryception');
+    } catch (error) {
+        console.error('[Summaryception] Failed to fetch Ollama models:', error);
+        showConnectionStatus('error', `Failed: ${error.message}`);
+        toastr.error(`Failed to fetch Ollama models: ${error.message}`, 'Summaryception');
+    }
+}
+
+async function testOpenAIConnectionHandler() {
+    const s = getSettings();
+
+    if (!s.openaiUrl) {
+        toastr.warning('Please enter an endpoint URL first.', 'Summaryception');
+        return;
+    }
+    if (!s.openaiModel) {
+        toastr.warning('Please enter a model name first.', 'Summaryception');
+        return;
+    }
+
+    showConnectionStatus('loading', 'Testing connection...');
+
+    const result = await testOpenAIConnection(s.openaiUrl, s.openaiKey, s.openaiModel);
+
+    if (result.success) {
+        showConnectionStatus('success', result.message);
+        toastr.success(result.message, 'Summaryception');
+    } else {
+        showConnectionStatus('error', result.message);
+        toastr.error(result.message, 'Summaryception');
+    }
+}
+
+function showConnectionStatus(type, message) {
+    const container = document.getElementById('summaryception_connection_status');
+    const icon = document.getElementById('summaryception_connection_status_icon');
+    const text = document.getElementById('summaryception_connection_status_text');
+
+    if (!container || !icon || !text) return;
+
+    container.style.display = 'flex';
+    container.className = 'summaryception-connection-status ' + type;
+
+    const icons = {
+        success: 'fa-solid fa-circle-check',
+        error: 'fa-solid fa-circle-xmark',
+        loading: 'fa-solid fa-spinner fa-spin',
+    };
+
+    icon.className = icons[type] || 'fa-solid fa-circle';
+    text.textContent = message;
+
+    if (type !== 'loading') {
+        setTimeout(() => {
+            if (container) container.style.display = 'none';
+        }, 8000);
+    }
+}
+
+async function fetchProfilesFallback(selectElement, currentValue) {
+    try {
+        const response = await fetch('/api/connection-manager/profiles', {
+            method: 'GET',
+            headers: SillyTavern.getContext().getRequestHeaders?.() || {
+                'Content-Type': 'application/json',
+            },
+        });
+
+        if (!response.ok) {
+            console.warn('[Summaryception] Could not fetch connection profiles from API');
+            return;
+        }
+
+        const profiles = await response.json();
+
+        selectElement.innerHTML = '<option value="">-- Select a Profile --</option>';
+
+        if (Array.isArray(profiles)) {
+            for (const profile of profiles) {
+                const opt = document.createElement('option');
+                opt.value = profile.id || profile.name;
+                opt.textContent = profile.name || profile.id;
+                selectElement.appendChild(opt);
+            }
+        } else if (typeof profiles === 'object') {
+            for (const [id, profile] of Object.entries(profiles)) {
+                const opt = document.createElement('option');
+                opt.value = id;
+                opt.textContent = profile.name || id;
+                selectElement.appendChild(opt);
+            }
+        }
+
+        if (currentValue) {
+            selectElement.value = currentValue;
+        }
+    } catch (error) {
+        console.warn('[Summaryception] Could not fetch connection profiles:', error);
+    }
+}
+
 // ─── Initialization ──────────────────────────────────────────────────
 
 (async function init() {
@@ -1495,6 +1771,7 @@ function bindUIEvents() {
     $('#extensions_settings2').append(html);
 
     bindUIEvents();
+    initConnectionUI();    // ← ADD THIS LINE
 
     eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
@@ -1505,6 +1782,6 @@ function bindUIEvents() {
     eventSource.on(event_types.APP_READY, () => {
         updateInjection();
         updateUI();
-        console.log(LOG_PREFIX, 'v4.0 loaded. Using native /hide /unhide for context exclusion.');
+        console.log(LOG_PREFIX, 'v5.0 loaded. Connection Settings available');
     });
 })();
