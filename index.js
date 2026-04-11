@@ -630,7 +630,7 @@ async function summarizeOneBatch(visibleTurns) {
         log(`Summarizing ${batch.length} assistant turns (indices ${startIdx}–${endIdx})`);
 
         if (!store.layers[0]) store.layers[0] = [];
-        const passageStart = (store.layers[0].length === 0) ? 0 : startIdx;
+        const passageStart = (store.layers[0].length === 0) ? 0 : store.summarizedUpTo + 1;
         if (passageStart === 0) {
             log('First summary — including messages 0-1 in passage');
         }
@@ -697,7 +697,7 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
     const endIdx = batch[batch.length - 1].index;
 
     if (!store.layers[0]) store.layers[0] = [];
-    const passageStart = (store.layers[0].length === 0) ? 0 : startIdx;
+    const passageStart = (store.layers[0].length === 0) ? 0 : store.summarizedUpTo + 1;
     if (passageStart === 0) {
         log('First summary — including messages 0-1 in passage');
     }
@@ -1812,6 +1812,6 @@ async function fetchProfilesFallback(selectElement, currentValue) {
     eventSource.on(event_types.APP_READY, () => {
         updateInjection();
         updateUI();
-        console.log(LOG_PREFIX, 'v5.1.0 loaded. Connection Settings available');
+        console.log(LOG_PREFIX, 'v5.1.2 loaded. Connection Settings available');
     });
 })();
