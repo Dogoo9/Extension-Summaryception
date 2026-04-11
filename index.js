@@ -29,7 +29,7 @@ const defaultSettings = Object.freeze({
     snippetsPerLayer: 20,
     snippetsPerPromotion: 2,
     maxLayers: 5,
-    injectionTemplate: '[Summary of past events:\n{{summary}}]',
+    injectionTemplate: '[Summary of past events: {{summary}}]',
 
     summarizerSystemPrompt:
     'You are a precise narrative-state tracker. You output only the summary line — no preamble, no commentary, no markdown.',
@@ -39,7 +39,10 @@ const defaultSettings = Object.freeze({
     <prior_context>{{context_str}}</prior_context>
     <passage_in_question>{{story_txt}}</passage_in_question>
 
-    Summarize only the necessary elements from the Passage_in_Question to coherently continue the Prior_Context, focusing on story, plot points, plans, tasks, quests, significant changes to player/world/setting.
+    Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context.
+
+    Focus on: story progression, plot points, plans, tasks, quests; location changes and current location (reference by name); location interactables encountered, used, or discovered; significant changes to player, NPCs, locations, world, or setting.
+
     Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
     Skip any passages that are empty, unclear, or lack significant content.
     Write in short phrases, no more than 20; output must be a single line:`,
@@ -1809,6 +1812,6 @@ async function fetchProfilesFallback(selectElement, currentValue) {
     eventSource.on(event_types.APP_READY, () => {
         updateInjection();
         updateUI();
-        console.log(LOG_PREFIX, 'v5.0.3 loaded. Connection Settings available');
+        console.log(LOG_PREFIX, 'v5.1.0 loaded. Connection Settings available');
     });
 })();
