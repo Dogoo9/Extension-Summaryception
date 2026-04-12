@@ -69,6 +69,11 @@ const defaultSettings = Object.freeze({
     openaiKey: '',
     openaiModel: '',
     openaiMaxTokens: 0,                   // 0 = no limit (provider default)
+
+    // KoboldCPP direct connection (fork addition)
+    koboldcppUrl:    'http://localhost:5001',
+    koboldcppPrefix: '<|im_start|>user\n',
+    koboldcppSuffix: '<|im_end|>\n<|im_start|>assistant\n',
 });
 
 // ─── Retry Configuration ─────────────────────────────────────────────
@@ -1820,15 +1825,46 @@ function initConnectionUI() {
         });
     }
 
+    // ── KoboldCPP URL ──
+    const kcppUrl = document.getElementById('summaryception_kcpp_url');
+    if (kcppUrl) {
+        kcppUrl.value = s().koboldcppUrl || 'http://localhost:5001';
+        kcppUrl.addEventListener('input', () => {
+            s().koboldcppUrl = kcppUrl.value.trim().replace(/\/+$/, '');
+            save();
+        });
+    }
+
+    // ── KoboldCPP Prefix ──
+    const kcppPrefix = document.getElementById('summaryception_kcpp_prefix');
+    if (kcppPrefix) {
+        kcppPrefix.value = (s().koboldcppPrefix || '<|im_start|>user\n').replace(/\n/g, '\\n');
+        kcppPrefix.addEventListener('input', () => {
+            s().koboldcppPrefix = kcppPrefix.value.replace(/\\n/g, '\n');
+            save();
+        });
+    }
+
+    // ── KoboldCPP Suffix ──
+    const kcppSuffix = document.getElementById('summaryception_kcpp_suffix');
+    if (kcppSuffix) {
+        kcppSuffix.value = (s().koboldcppSuffix || '<|im_end|>\n<|im_start|>assistant\n').replace(/\n/g, '\\n');
+        kcppSuffix.addEventListener('input', () => {
+            s().koboldcppSuffix = kcppSuffix.value.replace(/\\n/g, '\n');
+            save();
+        });
+    }
+
     // Set initial visibility
     updateConnectionSubPanels(s().connectionSource || 'default');
 }
 
 function updateConnectionSubPanels(source) {
     const panels = {
-        profile: document.getElementById('summaryception_profile_settings'),
-        ollama: document.getElementById('summaryception_ollama_settings'),
-        openai: document.getElementById('summaryception_openai_settings'),
+        profile:   document.getElementById('summaryception_profile_settings'),
+        ollama:    document.getElementById('summaryception_ollama_settings'),
+        openai:    document.getElementById('summaryception_openai_settings'),
+        koboldcpp: document.getElementById('summaryception_kcpp_settings'),
     };
 
     Object.values(panels).forEach(panel => {

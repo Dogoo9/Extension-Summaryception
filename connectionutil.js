@@ -83,6 +83,8 @@ export async function sendSummarizerRequest(settings, systemPrompt, userPrompt) 
             return await sendViaOllama(settings.ollamaUrl, settings.ollamaModel, systemPrompt, userPrompt);
         case 'openai':
             return await sendViaOpenAI(settings.openaiUrl, settings.openaiKey, settings.openaiModel, systemPrompt, userPrompt, settings.openaiMaxTokens);
+        case 'koboldcpp':
+            return await sendViaKoboldCPP(settings.koboldcppUrl, settings.koboldcppPrefix, settings.koboldcppSuffix, systemPrompt, userPrompt);
         case 'default':
         default:
             return await sendViaDefault(systemPrompt, userPrompt, settings.summarizerResponseLength);
@@ -583,6 +585,63 @@ export async function testOpenAIConnection(url, apiKey, model) {
     }
 }
 
+
+// ─── Mode 5: KoboldCPP (Direct) ─────────────────────────────────────
+
+/**
+ * Send a request directly to a KoboldCPP instance using /v1/completions.
+ * Does NOT use the CORS proxy — KoboldCPP is local and doesn't need it.
+ * Wraps system + user prompt with the configured instruct template.
+ *
+ * FORK NOTE: This is the KoboldCPP direct mode added in this fork.
+ * Search "Mode 5" to find it when merging upstream updates.
+ */
+async function sendViaKoboldCPP(url, instructPrefix, instructSuffix, systemPrompt, userPrompt) {
+    if (!url) {
+        throw new Error('KoboldCPP URL is not configured. Please set it in Summaryception settings.');
+    }
+
+    const baseUrl = url.replace(/\/+$/, '');
+    const prefix = (instructPrefix ?? '<|im_start|>user\n').replace(/\\n/g, '\n');
+    const suffix = (instructSuffix ?? '<|im_end|>\n<|im_start|>assistant\n').replace(/\\n/g, '\n');
+    const fullPrompt = `${prefix}${systemPrompt}\n\n${userPrompt}${suffix}`;
+
+    // Detect KoboldCPP's actual loaded context size so we don't exceed it
+    let maxCtx = 4096;
+    try {
+        const cfgRes = await fetch(`${baseUrl}/api/v1/config/max_context_length`);
+        if (cfgRes.ok) maxCtx = (await cfgRes.json()).value ?? maxCtx;
+    } catch { /* use default */ }
+
+    const response = await fetch(`${baseUrl}/v1/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            prompt:             fullPrompt,
+            max_tokens:         2000,
+            max_context_length: maxCtx,
+            temperature:        0.3,
+            top_p:              0.9,
+            frequency_penalty:  0.2,
+            stop: ['<|im_end|>', '<|eot_id|>', '<|end|>', '<|im_start|>'],
+        }),
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        throw new Error(`KoboldCPP request failed (${response.status}): ${errorText}`);
+    }
+
+    const data = await response.json();
+    const text = data?.choices?.[0]?.text ?? '';
+
+    if (!text.trim()) {
+        throw new Error('KoboldCPP returned an empty response. Check your instruct template settings.');
+    }
+
+    return text.trim();
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /**
@@ -627,6 +686,8 @@ export function getConnectionDisplayName(settings) {
             return `Ollama: ${settings.ollamaModel || '(no model)'}`;
         case 'openai':
             return `OpenAI: ${settings.openaiModel || '(no model)'}`;
+        case 'koboldcpp':
+            return `KoboldCPP: ${settings.koboldcppUrl || '(no URL)'}`;
         default:
             return 'Default (Main API)';
     }

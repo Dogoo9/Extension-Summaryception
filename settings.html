@@ -105,6 +105,7 @@
                                 <option value="profile">Connection Profile</option>
                                 <option value="ollama">Ollama (Local)</option>
                                 <option value="openai">OpenAI Compatible</option>
+                                <option value="koboldcpp">KoboldCPP (Direct)</option>
                             </select>
                         </div>
 
@@ -207,6 +208,38 @@
                                     (e.g. <code>http://localhost:1234/v1</code>).
                                     Local endpoints require <code>enableCorsProxy: true</code> in <code>config.yaml</code>.
                                     Cloud APIs (OpenRouter, etc.) work without the proxy.
+                                </small>
+                            </div>
+                        </div>
+
+
+                        <!-- ── KoboldCPP Sub-panel (fork addition) ── -->
+                        <div id="summaryception_kcpp_settings" class="summaryception-sub-panel" style="display: none;">
+                            <div class="summaryception-setting-row">
+                                <label for="summaryception_kcpp_url"><span>KoboldCPP URL</span></label>
+                                <input id="summaryception_kcpp_url" type="text" class="text_pole"
+                                       placeholder="http://localhost:5001" />
+                            </div>
+                            <div class="summaryception-setting-row">
+                                <label for="summaryception_kcpp_prefix">
+                                    <span>Instruct Prefix <small>(\n = newline)</small></span>
+                                </label>
+                                <input id="summaryception_kcpp_prefix" type="text" class="text_pole"
+                                       placeholder="&lt;|im_start|&gt;user\n" />
+                            </div>
+                            <div class="summaryception-setting-row">
+                                <label for="summaryception_kcpp_suffix">
+                                    <span>Instruct Suffix <small>(\n = newline)</small></span>
+                                </label>
+                                <input id="summaryception_kcpp_suffix" type="text" class="text_pole"
+                                       placeholder="&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n" />
+                            </div>
+                            <div class="summaryception-note">
+                                <span class="fa-solid fa-info-circle"></span>
+                                <small>
+                                    Connects directly to KoboldCPP without the CORS proxy.
+                                    Default template is ChatML (<code>&lt;|im_start|&gt;</code>).
+                                    Adjust Prefix/Suffix to match your loaded model's instruct format.
                                 </small>
                             </div>
                         </div>
