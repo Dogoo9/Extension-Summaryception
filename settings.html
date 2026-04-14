@@ -124,6 +124,8 @@
                                 <small>
                                     Uses a saved SillyTavern Connection Profile. Includes endpoint, API key, model, and presets.
                                     Requires ST 1.12.4+. For full API key support, use staging (March 2026+).
+                                    ⚠️ Connection Profiles inject preset formatting into summary requests, which may degrade summary quality.
+                                    ⚠️ Consider using Default or OpenAI Compatible instead.
                                 </small>
                             </div>
                         </div>
@@ -324,6 +326,17 @@
                             <span>System Prompt</span>
                         </label>
                         <textarea id="sc_summarizer_system_prompt" class="text_pole sc-textarea" rows="3"></textarea>
+                    </div>
+
+                    <div class="sc-setting-item">
+                        <label for="sc_prompt_preset">
+                            <small>Prompt Preset</small>
+                        </label>
+                        <select id="sc_prompt_preset" class="text_pole">
+                            <option value="narrative">Narrative State (Default)</option>
+                            <option value="gamestate">Game State</option>
+                            <option value="custom">Custom</option>
+                        </select>
                     </div>
 
                     <div class="sc-row">
