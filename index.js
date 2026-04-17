@@ -171,7 +171,8 @@ function log(...args) {
 function trace(...args) {
     const s = getSettings();
     if (s.debugMode && s.traceMode) {
-        console.log(LOG_PREFIX, '[TRACE]', ...args);
+        const normalized = args.map(arg => typeof arg === 'string' ? arg.toUpperCase() : arg);
+        console.log(LOG_PREFIX, '[TRACE]', ...normalized);
     }
 }
 
@@ -876,6 +877,9 @@ async function maybeSummarizeTurns() {
 // ─── Core: Single Batch Summarization ────────────────────────────────
 
 async function summarizeOneBatch(visibleTurns) {
+    trace('>>> ENTERING summarizeOneBatch');
+    trace('  visibleTurns:', visibleTurns?.length ?? 'UNDEFINED');
+
     const s = getSettings();
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
@@ -883,19 +887,25 @@ async function summarizeOneBatch(visibleTurns) {
     const batchSize = Math.min(s.turnsPerSummary, visibleTurns.length);
     const batch = visibleTurns.slice(0, batchSize);
 
-    if (batch.length === 0) return false;
+    if (batch.length === 0) {
+        trace('<<< EXITING summarizeOneBatch - EMPTY BATCH');
+        return false;
+    }
 
     isSummarizing = true;
 
     try {
         const startIdx = batch[0].index;
         const endIdx = batch[batch.length - 1].index;
+        trace('  startIdx:', startIdx, 'endIdx:', endIdx);
+        trace('  store.summarizedUpTo:', store.summarizedUpTo);
 
         log(`Summarizing ${batch.length} assistant turns (indices ${startIdx}–${endIdx})`);
 
         // ─── FIX: Ensure batch is actually after the summarized point ───
         if (startIdx <= store.summarizedUpTo) {
             log(`Skipping batch: startIdx (${startIdx}) is <= summarizedUpTo (${store.summarizedUpTo})`);
+            trace('<<< EXITING summarizeOneBatch - BATCH ALREADY SUMMARIZED');
             return false;
         }
 
@@ -905,11 +915,16 @@ async function summarizeOneBatch(visibleTurns) {
         // ─── SANITY CHECK ───
         if (passageStart > endIdx) {
             log(`ERROR: passageStart (${passageStart}) > endIdx (${endIdx}). Batch already summarized?`);
+            trace('<<< EXITING summarizeOneBatch - PASSAGE START GREATER THAN END');
             return false;
         }
 
         const storyTxt = buildPassageFromRange(chat, passageStart, endIdx);
-        if (!storyTxt.trim()) return false;
+        trace('  storyTxt length:', storyTxt?.length ?? 'UNDEFINED');
+        if (!storyTxt.trim()) {
+            trace('<<< EXITING summarizeOneBatch - EMPTY PASSAGE');
+            return false;
+        }
 
         const contextStr = buildFullContext(0);
 
@@ -919,9 +934,11 @@ async function summarizeOneBatch(visibleTurns) {
         });
 
         const summary = await callSummarizer(storyTxt, contextStr);
+        trace('  summary length:', summary?.length ?? 'UNDEFINED');
 
         if (!summary) {
             log('Summarization failed for batch, leaving turns intact for next attempt.');
+            trace('<<< EXITING summarizeOneBatch - EMPTY SUMMARY');
             return false;
         }
 
@@ -947,6 +964,7 @@ async function summarizeOneBatch(visibleTurns) {
         }
 
         toastr.success(`Summary saved (Layer 0: ${store.layers[0].length} snippets)`, 'Summaryception', { timeOut: 2000 });
+        trace('<<< EXITING summarizeOneBatch - SUCCESS');
         return true;
 
     } finally {
