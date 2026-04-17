@@ -19,6 +19,7 @@ import {
 
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
+// const TRACE_MODE = true;  // ultra-verbose logging
 
 // ─── Default Settings ────────────────────────────────────────────────
 
@@ -32,10 +33,10 @@ const defaultSettings = Object.freeze({
     injectionTemplate: '[Summary of past events: {{summary}}]',
 
     summarizerSystemPrompt:
-    'You are a precise narrative-state tracker. You output only the summary line — no preamble, no commentary, no markdown.',
+        'You are a precise narrative-state tracker. You output only the summary line — no preamble, no commentary, no markdown.',
 
     summarizerUserPrompt:
-    `<player_name>{{player_name}}</player_name>
+        `<player_name>{{player_name}}</player_name>
     <prior_context>{{context_str}}</prior_context>
     <passage_in_question>{{story_txt}}</passage_in_question>
 
@@ -124,8 +125,8 @@ function sleep(ms) {
 function parseRetryAfter(error) {
     try {
         const retryAfter = error?.response?.headers?.['retry-after']
-        || error?.retryAfter
-        || error?.data?.retry_after;
+            || error?.retryAfter
+            || error?.data?.retry_after;
         if (!retryAfter) return null;
         const seconds = Number(retryAfter);
         if (!isNaN(seconds)) return seconds * 1000;
@@ -169,41 +170,44 @@ function log(...args) {
 
 function trace(...args) {
     const s = getSettings();
-    if (s.debugMode && s.traceMode) console.log(LOG_PREFIX, '[TRACE]', ...args);
+    if (s.debugMode && s.traceMode) {
+        console.log(LOG_PREFIX, '[TRACE]', ...args);
+    }
 }
 
-async function repairGhostingForRange(endIndex) {
-    if (!Number.isInteger(endIndex) || endIndex < 0) return 0;
+function debugVisibleTurns(chat, store) {
+    trace('=== DEBUG VISIBLE TURNS ===');
+    trace('  store.summarizedUpTo:', store.summarizedUpTo);
+    trace('  Total chat messages:', chat.length);
 
-    const { chat } = SillyTavern.getContext();
-    const store = getChatStore();
-    const upperBound = Math.min(endIndex, chat.length - 1);
-    let repaired = 0;
+    let visibleCount = 0;
+    let ghostedCount = 0;
+    let hiddenCount = 0;
+    let visibleIndices = [];
 
-    for (let i = 0; i <= upperBound; i++) {
-        const msg = chat[i];
-        if (!msg) continue;
-        if (msg.is_system) continue;
-        if (msg.extra?.sc_ghosted) continue;
-        if (msg.is_hidden) continue;
-
-        if (!msg.extra) msg.extra = {};
-        msg.extra.sc_ghosted = true;
-
-        if (!store.ghostedIndices.includes(i)) {
-            store.ghostedIndices.push(i);
+    for (let i = 0; i < chat.length; i++) {
+        const m = chat[i];
+        if (!m.is_user && !m.is_system && !m.extra?.sc_ghosted && m.mes?.trim()?.length > 0) {
+            visibleCount++;
+            visibleIndices.push(i);
         }
-
-        try {
-            await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false });
-        } catch (e) {
-            log(`Failed to repair-hide message ${i}:`, e);
-        }
-
-        repaired++;
+        if (m.extra?.sc_ghosted) ghostedCount++;
+        if (m.is_hidden || m.is_system) hiddenCount++;
     }
 
-    return repaired;
+    trace('  Visible non-ghosted turns:', visibleCount);
+    trace('  Ghosted turns:', ghostedCount);
+    trace('  Hidden/System turns:', hiddenCount);
+    trace('  First 10 visible indices:', visibleIndices.slice(0, 10));
+    trace('  Last 10 visible indices:', visibleIndices.slice(-10));
+
+    // Check for messages that should have been ghosted but aren't
+    const unghosteredSummarized = visibleIndices.filter(idx => idx <= store.summarizedUpTo);
+    if (unghosteredSummarized.length > 0) {
+        trace('  ⚠️ WARNING: Found ' + unghosteredSummarized.length + ' visible messages that are BEFORE summarizedUpTo!');
+        trace('  First 5 unghostered summarized indices:', unghosteredSummarized.slice(0, 5));
+    }
+    trace('=== END DEBUG ===');
 }
 
 function getSettings() {
@@ -249,6 +253,66 @@ function getPlayerName() {
 }
 
 // ─── Message Hiding (Ghosting via native /hide /unhide) ──────────────
+async function repairGhostingForRange(startIdx, endIdx) {
+    trace('>>> ENTERING repairGhostingForRange');
+    trace('  startIdx:', startIdx, 'endIdx:', endIdx);
+
+    const { chat } = SillyTavern.getContext();
+    const store = getChatStore();
+    let repaired = 0;
+    let skipped = 0;
+
+    for (let i = startIdx; i <= endIdx; i++) {
+        const m = chat[i];
+        if (!m) continue;
+
+        // Skip if already ghosted
+        if (m.extra?.sc_ghosted) {
+            skipped++;
+            continue;
+        }
+
+        // Skip if user-hidden (not by us)
+        if (m.is_hidden && !m.extra?.sc_ghosted) {
+            trace('  Skipping message ' + i + ' - user-hidden');
+            skipped++;
+            continue;
+        }
+
+        // Skip system/empty messages
+        if (m.is_system || !m.mes?.trim()) {
+            skipped++;
+            continue;
+        }
+
+        // Skip user messages
+        if (m.is_user) {
+            skipped++;
+            continue;
+        }
+
+        // This is an assistant message that should be ghosted but isn't
+        trace('  Ghosting message ' + i);
+        m.extra = m.extra || {};
+        m.extra.sc_ghosted = true;
+
+        if (!store.ghostedIndices.includes(i)) {
+            store.ghostedIndices.push(i);
+        }
+
+        try {
+            await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false });
+            repaired++;
+        } catch (e) {
+            console.error(LOG_PREFIX, 'Failed to ghost message ' + i + ':', e);
+        }
+    }
+
+    trace('  Repaired:', repaired, 'Skipped:', skipped);
+    await saveChatStore();
+    trace('<<< EXITING repairGhostingForRange');
+    return repaired;
+}
 
 async function ghostMessage(messageIndex) {
     const { chat } = SillyTavern.getContext();
@@ -280,8 +344,8 @@ async function unghostAllMessages() {
 
     // Only unhide messages that WE ghosted, not user-hidden messages
     const toUnhide = store.ghostedIndices && store.ghostedIndices.length > 0
-    ? [...store.ghostedIndices]
-    : [];
+        ? [...store.ghostedIndices]
+        : [];
 
     // Fallback for older saves that don't have ghostedIndices:
     // find messages with our sc_ghosted flag
@@ -596,16 +660,20 @@ function abortSummarization() {
 // ─── Core: LLM Summarization with Retry ──────────────────────────────
 
 async function callSummarizer(storyTxt, contextStr) {
-    trace('callSummarizer entered', {
-        storyLength: storyTxt?.length ?? 0,
-        contextLength: contextStr?.length ?? 0,
-    });
+    trace('>>> ENTERING callSummarizer');
+    trace('  storyTxt length:', storyTxt?.length ?? 'UNDEFINED');
+    trace('  contextStr length:', contextStr?.length ?? 'UNDEFINED');
+
     const s = getSettings();
+    trace('  settings loaded:', {
+        connectionSource: s.connectionSource,
+        enabled: s.enabled,
+    });
 
     const prompt = s.summarizerUserPrompt
-    .replace('{{player_name}}', getPlayerName())
-    .replace('{{context_str}}', contextStr || '(none yet)')
-    .replace('{{story_txt}}', storyTxt);
+        .replace('{{player_name}}', getPlayerName())
+        .replace('{{context_str}}', contextStr || '(none yet)')
+        .replace('{{story_txt}}', storyTxt);
 
     log('── Summarizer Call ──');
     log('Context str length:', contextStr.length, 'chars');
@@ -622,7 +690,8 @@ async function callSummarizer(storyTxt, contextStr) {
 
     try {
         for (let attempt = 0; attempt <= RETRY_CONFIG.maxRetries; attempt++) {
-            trace('callSummarizer attempt', { attempt, maxRetries: RETRY_CONFIG.maxRetries });
+            trace(`  Attempt ${attempt} starting...`);
+
             if (signal.aborted) {
                 log('Summarization aborted by user.');
                 toastr.warning('Summarization aborted.', 'Summaryception', { timeOut: 3000 });
@@ -634,17 +703,25 @@ async function callSummarizer(storyTxt, contextStr) {
                     log(`Retry attempt ${attempt}/${RETRY_CONFIG.maxRetries}`);
                 }
 
+                trace(`  About to call sendSummarizerRequest with:`, {
+                    connectionSource: s.connectionSource,
+                    summarizerSystemPrompt: s.summarizerSystemPrompt?.substring(0, 50),
+                    promptLength: prompt.length,
+                });
+
                 const timeoutMs = 120000;
                 const result = await Promise.race([
                     sendSummarizerRequest(s, s.summarizerSystemPrompt, prompt),
-                                                  new Promise((_, reject) => {
-                                                      const timer = setTimeout(() => reject(new Error('Request timed out after 120s')), timeoutMs);
-                                                      signal.addEventListener('abort', () => {
-                                                          clearTimeout(timer);
-                                                          reject(new Error('Aborted by user'));
-                                                      });
-                                                  }),
+                    new Promise((_, reject) => {
+                        const timer = setTimeout(() => reject(new Error('Request timed out after 120s')), timeoutMs);
+                        signal.addEventListener('abort', () => {
+                            clearTimeout(timer);
+                            reject(new Error('Aborted by user'));
+                        });
+                    }),
                 ]);
+
+                trace('  sendSummarizerRequest returned:', result?.substring?.(0, 50));
 
                 let trimmed = (result || '').trim();
                 trimmed = cleanSummarizerOutput(trimmed);
@@ -655,16 +732,15 @@ async function callSummarizer(storyTxt, contextStr) {
                 }
 
                 log('Result:', trimmed);
-                trace('callSummarizer success', { attempt, resultLength: trimmed.length });
+                trace('<<< EXITING callSummarizer WITH SUCCESS');
                 return trimmed;
 
             } catch (err) {
                 lastError = err;
-                trace('callSummarizer error', {
-                    attempt,
+                trace(`  Caught error on attempt ${attempt}:`, {
                     name: err?.name,
-                    status: err?.status || err?.response?.status || '',
-                    message: err?.message || String(err),
+                    message: err?.message,
+                    retryable: err?.retryable,
                 });
 
                 if (signal.aborted || err.message === 'Aborted by user') {
@@ -674,11 +750,13 @@ async function callSummarizer(storyTxt, contextStr) {
                 }
 
                 if (!isRetryableError(err)) {
+                    trace('  ERROR IS NON-RETRYABLE, BREAKING');
                     console.error(LOG_PREFIX, 'Non-retryable error:', err);
                     break;
                 }
 
                 if (attempt >= RETRY_CONFIG.maxRetries) {
+                    trace('  MAX RETRIES EXHAUSTED');
                     console.error(LOG_PREFIX, `All ${RETRY_CONFIG.maxRetries} retries exhausted.`);
                     break;
                 }
@@ -701,8 +779,8 @@ async function callSummarizer(storyTxt, contextStr) {
 
                 toastr.warning(
                     `API error (${status}). Retrying in ${delaySec}s... (${attempt + 1}/${RETRY_CONFIG.maxRetries})`,
-                               'Summaryception',
-                               { timeOut: delay }
+                    'Summaryception',
+                    { timeOut: delay }
                 );
 
                 await new Promise((resolve) => {
@@ -717,12 +795,12 @@ async function callSummarizer(storyTxt, contextStr) {
 
         const status = lastError?.status || lastError?.response?.status || '';
         console.error(LOG_PREFIX, 'Summarization failed after all retries:', lastError);
-        trace('callSummarizer failed', { status });
         toastr.error(
             `Summarization failed after ${RETRY_CONFIG.maxRetries} retries${status ? ` (${status})` : ''}. Batch skipped — will retry on next trigger.`,
-                     'Summaryception',
-                     { timeOut: 8000 }
+            'Summaryception',
+            { timeOut: 8000 }
         );
+        trace('<<< EXITING callSummarizer WITH FAILURE');
         return '';
 
     } finally {
@@ -812,31 +890,26 @@ async function summarizeOneBatch(visibleTurns) {
     try {
         const startIdx = batch[0].index;
         const endIdx = batch[batch.length - 1].index;
-        trace('summarizeOneBatch start', { startIdx, endIdx, summarizedUpTo: store.summarizedUpTo });
-
-        if (startIdx <= store.summarizedUpTo) {
-            log(`Skipping batch (${startIdx}–${endIdx}) because it is already summarized up to ${store.summarizedUpTo}.`);
-            trace('summarizeOneBatch skipped: already summarized');
-            return false;
-        }
 
         log(`Summarizing ${batch.length} assistant turns (indices ${startIdx}–${endIdx})`);
 
+        // ─── FIX: Ensure batch is actually after the summarized point ───
+        if (startIdx <= store.summarizedUpTo) {
+            log(`Skipping batch: startIdx (${startIdx}) is <= summarizedUpTo (${store.summarizedUpTo})`);
+            return false;
+        }
+
         if (!store.layers[0]) store.layers[0] = [];
         const passageStart = store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1;
-        trace('summarizeOneBatch passage range', { passageStart, endIdx });
 
+        // ─── SANITY CHECK ───
         if (passageStart > endIdx) {
-            log(`Invalid passage range (${passageStart} > ${endIdx}), skipping batch.`);
-            trace('summarizeOneBatch skipped: invalid range');
+            log(`ERROR: passageStart (${passageStart}) > endIdx (${endIdx}). Batch already summarized?`);
             return false;
         }
 
         const storyTxt = buildPassageFromRange(chat, passageStart, endIdx);
-        if (!storyTxt.trim()) {
-            trace('summarizeOneBatch skipped: empty story text');
-            return false;
-        }
+        if (!storyTxt.trim()) return false;
 
         const contextStr = buildFullContext(0);
 
@@ -884,51 +957,76 @@ async function summarizeOneBatch(visibleTurns) {
 // ─── Core: Inner Batch for Catchup ───────────────────────────────────
 
 async function summarizeOneBatchFromTurns(visibleTurns) {
-    trace('summarizeOneBatchFromTurns entered', { visibleTurns: visibleTurns?.length ?? 0 });
+    trace('>>> ENTERING summarizeOneBatchFromTurns');
+    trace('  visibleTurns:', visibleTurns?.length ?? 'UNDEFINED');
+
+    const s = getSettings();
+    const { chat } = SillyTavern.getContext();
+    const store = getChatStore();
+
+    const batchSize = Math.min(s.turnsPerSummary, visibleTurns.length);
+    const batch = visibleTurns.slice(0, batchSize);
+
+    trace('  batchSize:', batchSize);
+    trace('  batch prepared:', batch.length);
+
+    if (batch.length === 0) {
+        trace('<<< EXITING summarizeOneBatchFromTurns - EMPTY BATCH');
+        return false;
+    }
+
+    const startIdx = batch[0].index;
+    const endIdx = batch[batch.length - 1].index;
+
+    trace('  startIdx:', startIdx, 'endIdx:', endIdx);
+    trace('  store.summarizedUpTo:', store.summarizedUpTo);
+
+    // ─── FIX: Ensure batch is actually after the summarized point ───
+    // If this batch starts BEFORE summarizedUpTo, skip it entirely
+    if (startIdx <= store.summarizedUpTo) {
+        trace('  SKIP: batch startIdx (' + startIdx + ') is <= summarizedUpTo (' + store.summarizedUpTo + ')');
+        trace('<<< EXITING - batch is before summarized point');
+        return false;
+    }
+
+    if (!store.layers[0]) store.layers[0] = [];
+
+    // ─── FIX: Start from the message AFTER the last summarized one ───
+    const passageStart = store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1;
+
+    trace('  passageStart:', passageStart, 'endIdx:', endIdx);
+
+    // ─── SANITY CHECK: passageStart should always be <= endIdx ───
+    if (passageStart > endIdx) {
+        trace('  CRITICAL: passageStart > endIdx! This should never happen.');
+        trace('  This likely means the batch was already summarized.');
+        trace('<<< EXITING - passageStart > endIdx');
+        return false;
+    }
+
+    trace('  About to call buildPassageFromRange...');
+
     try {
-        const s = getSettings();
-        const { chat } = SillyTavern.getContext();
-        const store = getChatStore();
-
-        const batchSize = Math.min(s.turnsPerSummary, visibleTurns.length);
-        const batch = visibleTurns.slice(0, batchSize);
-        trace('summarizeOneBatchFromTurns batch', { batchSize, actual: batch.length });
-
-        if (batch.length === 0) return false;
-
-        const startIdx = batch[0].index;
-        const endIdx = batch[batch.length - 1].index;
-        trace('summarizeOneBatchFromTurns range', { startIdx, endIdx, summarizedUpTo: store.summarizedUpTo });
-
-        if (startIdx <= store.summarizedUpTo) {
-            log(`Skipping batch (${startIdx}–${endIdx}) because it is already summarized up to ${store.summarizedUpTo}.`);
-            trace('summarizeOneBatchFromTurns skipped: already summarized');
-            return false;
-        }
-
-        if (!store.layers[0]) store.layers[0] = [];
-        const passageStart = store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1;
-        trace('summarizeOneBatchFromTurns passage range', { passageStart, endIdx });
-
-        if (passageStart > endIdx) {
-            log(`Invalid passage range (${passageStart} > ${endIdx}), skipping batch.`);
-            trace('summarizeOneBatchFromTurns skipped: invalid range');
-            return false;
-        }
-
         const storyTxt = buildPassageFromRange(chat, passageStart, endIdx);
+        trace('  buildPassageFromRange returned, length:', storyTxt?.length ?? 'UNDEFINED');
+
         if (!storyTxt.trim()) {
-            trace('summarizeOneBatchFromTurns skipped: empty story text');
+            trace('  <<< EXITING - storyTxt is empty after trim');
+            trace('  This suggests all messages in range [' + passageStart + ', ' + endIdx + '] are hidden or empty');
             return false;
         }
 
+        trace('  About to call buildFullContext...');
         const contextStr = buildFullContext(0);
+        trace('  buildFullContext returned, length:', contextStr?.length ?? 'UNDEFINED');
 
+        trace('  About to call callSummarizer...');
         const summary = await callSummarizer(storyTxt, contextStr);
+        trace('  callSummarizer returned, length:', summary?.length ?? 'UNDEFINED');
 
         if (!summary) {
             log('Summarization failed for batch, leaving turns intact for next attempt.');
-            trace('summarizeOneBatchFromTurns failed: empty summary');
+            trace('  <<< EXITING - summary is empty');
             return false;
         }
 
@@ -939,6 +1037,7 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         });
 
         store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
+        trace('  Updated store.summarizedUpTo to:', store.summarizedUpTo);
 
         await saveChatStore();
         await ghostMessagesUpTo(endIdx);
@@ -952,11 +1051,17 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
             log('Could not save chat:', e);
         }
 
-        trace('summarizeOneBatchFromTurns success', { endIdx, summarizedUpTo: store.summarizedUpTo });
+        trace('<<< EXITING summarizeOneBatchFromTurns - SUCCESS');
         return true;
-    } catch (e) {
-        console.error(LOG_PREFIX, 'Unexpected error in summarizeOneBatchFromTurns:', e);
-        trace('summarizeOneBatchFromTurns exception', { error: e?.message || String(e) });
+
+    } catch (err) {
+        trace('  CAUGHT EXCEPTION:', {
+            name: err?.name,
+            message: err?.message,
+            stack: err?.stack?.substring?.(0, 200),
+        });
+        console.error(LOG_PREFIX, 'summarizeOneBatchFromTurns exception:', err);
+        trace('<<< EXITING summarizeOneBatchFromTurns - EXCEPTION');
         return false;
     }
 }
@@ -964,26 +1069,32 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
 // ─── Core: Catchup Processing ────────────────────────────────────────
 
 async function runCatchup(visibleTurns, overflow) {
+
+    trace('>>> ENTERING runCatchup');
+    trace('  visibleTurns:', visibleTurns?.length ?? 'UNDEFINED');
+    trace('  overflow:', overflow);
+
     const s = getSettings();
     const totalBatches = Math.ceil(overflow / s.turnsPerSummary);
-    trace('runCatchup start', { visibleTurns: visibleTurns?.length ?? 0, overflow, totalBatches });
     let completed = 0;
     let failed = 0;
     let cancelled = false;
 
+    trace('  totalBatches calculated:', totalBatches);
+
     const progressToast = toastr.info(
         `Processing backlog: 0 / ${totalBatches} batches (0%)`,
-                                      'Summaryception Catch-Up',
-                                      {
-                                          timeOut: 0,
-                                          extendedTimeOut: 0,
-                                          tapToDismiss: false,
-                                          closeButton: true,
-                                          onCloseClick: () => {
-                                              cancelled = true;
-                                              abortSummarization();
-                                          },
-                                      }
+        'Summaryception Catch-Up',
+        {
+            timeOut: 0,
+            extendedTimeOut: 0,
+            tapToDismiss: false,
+            closeButton: true,
+            onCloseClick: () => {
+                cancelled = true;
+                abortSummarization();
+            },
+        }
     );
 
     isSummarizing = true;
@@ -992,30 +1103,38 @@ async function runCatchup(visibleTurns, overflow) {
         let consecutiveFailures = 0;
 
         while (!cancelled) {
+            trace(`  Loop iteration - completed: ${completed}, failed: ${failed}`);
+
             const { chat } = SillyTavern.getContext();
             const allAssistantTurns = getAssistantTurns(chat);
             const currentVisible = allAssistantTurns.filter(t => !chat[t.index].extra?.sc_ghosted);
-            trace('runCatchup loop', { completed, failed, currentVisible: currentVisible.length, verbatimTurns: s.verbatimTurns });
 
-            if (currentVisible.length <= s.verbatimTurns) break;
+            trace(`  currentVisible turns: ${currentVisible.length}, verbatimTurns limit: ${s.verbatimTurns}`);
 
+            if (currentVisible.length <= s.verbatimTurns) {
+                trace('  Visible turns now within limit, breaking');
+                break;
+            }
+
+            trace('  About to call summarizeOneBatchFromTurns...');
             const success = await summarizeOneBatchFromTurns(currentVisible);
-            trace('runCatchup batch result', { success });
 
             if (success) {
+                trace('  >>> summarizeOneBatchFromTurns returned SUCCESS');
                 completed++;
                 consecutiveFailures = 0;
             } else {
+                trace('  >>> summarizeOneBatchFromTurns returned FAILURE');
                 failed++;
                 consecutiveFailures++;
 
                 if (consecutiveFailures >= 3) {
-                    trace('runCatchup halted: consecutive failures', { consecutiveFailures });
                     toastr.error(
                         '3 consecutive failures — API may be down. Pausing catch-up. Progress saved; will resume on next message.',
                         'Summaryception',
                         { timeOut: 8000 }
                     );
+                    trace('  3 consecutive failures, breaking');
                     break;
                 }
             }
@@ -1032,25 +1151,22 @@ async function runCatchup(visibleTurns, overflow) {
         toastr.clear(progressToast);
 
         if (cancelled) {
-            trace('runCatchup finished: cancelled', { completed, failed, totalBatches });
             toastr.warning(
                 `Catch-up paused at ${completed}/${totalBatches}. Progress saved — will continue on next message.`,
                 'Summaryception',
                 { timeOut: 5000 }
             );
         } else if (failed === 0) {
-            trace('runCatchup finished: success', { completed, totalBatches });
             toastr.success(
                 `Catch-up complete! ${completed} batches processed.`,
                 'Summaryception',
                 { timeOut: 4000 }
             );
         } else {
-            trace('runCatchup finished: partial', { completed, failed, totalBatches });
             toastr.warning(
                 `Catch-up finished. ${completed} succeeded, ${failed} failed (will retry on next trigger).`,
-                           'Summaryception',
-                           { timeOut: 6000 }
+                'Summaryception',
+                { timeOut: 6000 }
             );
         }
 
@@ -1149,8 +1265,8 @@ async function maybePromoteLayer(layerIndex) {
 
         toastr.info(
             `Seeded Layer ${layerIndex + 1} from Layer ${layerIndex} (free promotion)`,
-                    'Summaryception',
-                    { timeOut: 2000 }
+            'Summaryception',
+            { timeOut: 2000 }
         );
 
         if (layer.length > s.snippetsPerLayer) {
@@ -1451,15 +1567,15 @@ function updateSnippetBrowser() {
             for (let j = 0; j < layer.length; j++) {
                 const sn = layer[j];
                 const rangeStr = sn.turnRange
-                ? `turns ${sn.turnRange[0]}–${sn.turnRange[1]}`
-                : sn.mergedCount
-                ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
-                : '';
+                    ? `turns ${sn.turnRange[0]}–${sn.turnRange[1]}`
+                    : sn.mergedCount
+                        ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
+                        : '';
                 const seedStr = sn.promoted ? ' 🌱' : '';
                 const canRedo = (i === 0 && sn.turnRange);
                 const redoBtn = canRedo
-                ? `<button class="sc-snippet-redo menu_button fa-solid fa-rotate-right" title="Regenerate this snippet"></button>`
-                : '';
+                    ? `<button class="sc-snippet-redo menu_button fa-solid fa-rotate-right" title="Regenerate this snippet"></button>`
+                    : '';
 
                 html += `<div class="sc-snippet" data-layer="${i}" data-idx="${j}">
                 <span class="sc-snippet-text" data-layer="${i}" data-idx="${j}" title="Click to edit">${escapeHtml(sn.text)}</span>
@@ -1485,32 +1601,32 @@ function updateSnippetBrowser() {
         const textEl = $(this);
 
         const textarea = $('<textarea class="sc-snippet-edit"></textarea>')
-        .val(sn.text)
-        .on('keydown', async function (e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
+            .val(sn.text)
+            .on('keydown', async function (e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    const newText = $(this).val().trim();
+                    if (newText) {
+                        sn.text = newText;
+                        await saveChatStore();
+                        updateInjection();
+                        toastr.success('Snippet updated', 'Summaryception', { timeOut: 1500 });
+                    }
+                    updateSnippetBrowser();
+                } else if (e.key === 'Escape') {
+                    updateSnippetBrowser();
+                }
+            })
+            .on('blur', async function () {
                 const newText = $(this).val().trim();
-                if (newText) {
+                if (newText && newText !== sn.text) {
                     sn.text = newText;
                     await saveChatStore();
                     updateInjection();
                     toastr.success('Snippet updated', 'Summaryception', { timeOut: 1500 });
                 }
                 updateSnippetBrowser();
-            } else if (e.key === 'Escape') {
-                updateSnippetBrowser();
-            }
-        })
-        .on('blur', async function () {
-            const newText = $(this).val().trim();
-            if (newText && newText !== sn.text) {
-                sn.text = newText;
-                await saveChatStore();
-                updateInjection();
-                toastr.success('Snippet updated', 'Summaryception', { timeOut: 1500 });
-            }
-            updateSnippetBrowser();
-        });
+            });
 
         textEl.replaceWith(textarea);
 
@@ -1534,8 +1650,8 @@ function updateSnippetBrowser() {
         if (!sn.turnRange) {
             toastr.warning(
                 'Only Layer 0 (turn summary) snippets can be regenerated. Promoted meta-summaries have no source turns.',
-                           'Summaryception',
-                           { timeOut: 5000 }
+                'Summaryception',
+                { timeOut: 5000 }
             );
             return;
         }
@@ -1611,8 +1727,8 @@ function updateSnippetBrowser() {
 
             if (store.layers[0] && store.layers[0].length > 0) {
                 const maxEnd = Math.max(...store.layers[0]
-                .filter(sn => sn.turnRange)
-                .map(sn => sn.turnRange[1]));
+                    .filter(sn => sn.turnRange)
+                    .map(sn => sn.turnRange[1]));
                 store.summarizedUpTo = maxEnd;
             } else {
                 store.summarizedUpTo = -1;
@@ -1724,10 +1840,10 @@ function bindUIEvents() {
             const m = chat[i];
 
             const isStuckHidden = (m.is_system || m.is_hidden)
-            && !m.is_user
-            && !m.extra?.sc_ghosted
-            && m.mes
-            && m.mes.trim().length > 0;
+                && !m.is_user
+                && !m.extra?.sc_ghosted
+                && m.mes
+                && m.mes.trim().length > 0;
 
             if (isStuckHidden) {
                 try {
@@ -1769,34 +1885,18 @@ function bindUIEvents() {
         }
     });
 
-    $('#sc_clear_memory').on('click', async function () {
-        if (!confirm('Clear ALL Summaryception memory for this chat and unghost all messages?')) return;
-
-        await unghostAllMessages();
-
-        const store = getChatStore();
-        store.layers.length = 0;
-        store.summarizedUpTo = -1;
-        store.ghostedIndices = [];
-
-        const { chatMetadata } = SillyTavern.getContext();
-        chatMetadata[MODULE_NAME] = store;
-
-        await saveChatStore();
-        try {
-            const ctx = SillyTavern.getContext();
-            if (ctx.saveChat) await ctx.saveChat();
-        } catch (e) {
-            log('Could not save chat:', e);
-        }
-        updateInjection();
-        updateUI();
-        toastr.success('Memory cleared & messages unghosted', 'Summaryception');
-    });
-
     $('#sc_force_summarize').on('click', async function () {
-        trace('force summarize clicked');
+        trace('>>> FORCE SUMMARIZE CLICKED');
+
         const s = getSettings();
+        const { chat } = SillyTavern.getContext();
+        const store = getChatStore();
+
+        trace('  enabled:', s.enabled);
+        trace('  isSummarizing:', isSummarizing);
+
+        debugVisibleTurns(chat, store);
+
         if (!s.enabled) {
             toastr.warning('Enable Summaryception first.');
             return;
@@ -1808,50 +1908,61 @@ function bindUIEvents() {
         if (s.pauseSummarization) {
             log('Force Summarize overrides pause mode.');
         }
+
+        // ─── NEW: Repair ghosting before proceeding ───
+        if (store.summarizedUpTo >= 0) {
+            trace('  Checking ghosting integrity...');
+            const unghosteredCount = Array.from({ length: store.summarizedUpTo + 1 }).reduce((count, _, i) => {
+                const m = chat[i];
+                return (!m.is_user && !m.is_system && !m.extra?.sc_ghosted && m.mes?.trim()) ? count + 1 : count;
+            }, 0);
+
+            if (unghosteredCount > 0) {
+                trace('  Found ' + unghosteredCount + ' unghosted messages up to summarizedUpTo');
+                toastr.warning(
+                    `Found ${unghosteredCount} messages that should be hidden. Repairing ghosting...`,
+                    'Summaryception',
+                    { timeOut: 3000 }
+                );
+
+                const repaired = await repairGhostingForRange(0, store.summarizedUpTo);
+                trace('  Repaired ' + repaired + ' messages');
+                toastr.info(
+                    `Repaired ghosting for ${repaired} messages.`,
+                    'Summaryception',
+                    { timeOut: 2000 }
+                );
+            }
+        }
+
         $(this).prop('disabled', true).text(' Working…');
         try {
             catchupDismissed = false;
 
-            const { chat } = SillyTavern.getContext();
-            const store = getChatStore();
-            const repairBoundary = store.summarizedUpTo ?? -1;
+            const allAssistantTurns = getAssistantTurns(chat);
+            const visibleTurns = allAssistantTurns.filter(t => !chat[t.index].extra?.sc_ghosted);
 
-            if (repairBoundary >= 0) {
-                const allAssistantTurns = getAssistantTurns(chat);
-                const unghostedBeforeBoundary = allAssistantTurns.filter(t => t.index <= repairBoundary && !chat[t.index].extra?.sc_ghosted);
-                trace('force summarize ghosting check', { repairBoundary, unghostedBeforeBoundary: unghostedBeforeBoundary.length });
-
-                if (unghostedBeforeBoundary.length > 0) {
-                    toastr.info(
-                        `Detected ${unghostedBeforeBoundary.length} summarized turns that were not ghosted. Repairing now...`,
-                        'Summaryception',
-                        { timeOut: 3500 }
-                    );
-                    const repaired = await repairGhostingForRange(repairBoundary);
-                    await saveChatStore();
-                    trace('force summarize ghosting repair complete', { repaired });
-                    toastr.success(`Ghosting repair complete (${repaired} messages).`, 'Summaryception', { timeOut: 3000 });
-                }
-            }
-
-            const refreshedAssistantTurns = getAssistantTurns(chat);
-            const visibleTurns = refreshedAssistantTurns.filter(t => !chat[t.index].extra?.sc_ghosted);
-            trace('force summarize turns', { all: refreshedAssistantTurns.length, visible: visibleTurns.length });
+            trace('  allAssistantTurns:', allAssistantTurns.length);
+            trace('  visibleTurns after repair:', visibleTurns.length);
 
             if (visibleTurns.length <= s.verbatimTurns) {
                 toastr.info('Nothing to summarize — visible turns are within the verbatim limit.', 'Summaryception');
+                trace('<<< FORCE SUMMARIZE - nothing to summarize');
                 return;
             }
 
             const overflow = visibleTurns.length - s.verbatimTurns;
-            trace('force summarize overflow', { overflow });
+            trace('  overflow turns:', overflow);
             toastr.info(`${overflow} turns to process. Starting...`, 'Summaryception', { timeOut: 2000 });
 
+            trace('  About to call runCatchup...');
             await runCatchup(visibleTurns, overflow);
+            trace('  runCatchup returned');
             updateInjection();
         } finally {
             $(this).prop('disabled', false).html('<i class="fa-solid fa-bolt"></i> Force Summarize Now');
             updateUI();
+            trace('<<< FORCE SUMMARIZE COMPLETED');
         }
     });
 
@@ -1920,8 +2031,8 @@ function bindUIEvents() {
                 updateUI();
                 toastr.success(
                     `Memory imported. ${store.layers.reduce((sum, l) => sum + (l?.length || 0), 0)} snippets loaded, messages ghosted up to index ${store.summarizedUpTo}.`,
-                               'Summaryception',
-                               { timeOut: 4000 }
+                    'Summaryception',
+                    { timeOut: 4000 }
                 );
             } catch (err) {
                 console.error(LOG_PREFIX, err);
@@ -2089,9 +2200,9 @@ function updateConnectionSubPanels(source) {
         if (panel) panel.style.display = 'none';
     });
 
-        if (panels[source]) {
-            panels[source].style.display = 'block';
-        }
+    if (panels[source]) {
+        panels[source].style.display = 'block';
+    }
 }
 
 function populateOllamaModelDropdown(selectElement, models, currentValue) {
@@ -2228,6 +2339,8 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         console.warn('[Summaryception] Could not fetch connection profiles:', error);
     }
 }
+
+// ─── Initialization ──────────────────────────────────────────────────
 
 // ─── Initialization ──────────────────────────────────────────────────
 
