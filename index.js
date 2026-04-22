@@ -62,7 +62,7 @@ const defaultSettings = Object.freeze({
     debugMode: false,
 
     // ─── Connection Settings ─────────────────────────────────────
-    connectionSource: 'default',          // 'default' | 'profile' | 'ollama' | 'openai'
+    connectionSource: 'default',          // 'default' | 'profile' | 'ollama' | 'openai' | 'koboldcpp'
     summarizerResponseLength: 0,          // 0 = use preset default; set lower if you get "max_tokens > 4096 must have stream=true" errors
     connectionProfileId: '',              // ID of selected ST Connection Profile
     ollamaUrl: 'http://localhost:11434',
