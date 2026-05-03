@@ -1978,10 +1978,6 @@ function bindUIEvents() {
             trace('  visibleTurns after repair:', visibleTurns.length);
             trace('  unsummarizedVisibleTurns:', unsummarizedVisibleTurns.length);
             trace('  summarizedUpTo:', store.summarizedUpTo);
-            if (unsummarizedVisibleTurns.length > 0) {
-                trace('  first unsummarized index:', unsummarizedVisibleTurns[0].index);
-                trace('  last unsummarized index:', unsummarizedVisibleTurns[unsummarizedVisibleTurns.length - 1].index);
-            }
 
             // Standard path: summarize until we are back under the verbatim window.
             if (visibleTurns.length > s.verbatimTurns) {
