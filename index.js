@@ -1994,32 +1994,13 @@ function bindUIEvents() {
             catchupDismissed = false;
 
             const allAssistantTurns = getAssistantTurns(chat);
-            let visibleTurns = allAssistantTurns.filter(t => !chat[t.index].extra?.sc_ghosted);
-
-            // Compatibility fallback: some ST setups/forks may flag assistant replies as system messages.
-            // If our strict assistant detector yields zero visible turns, fall back to any non-user, non-ghosted text messages.
-            if (visibleTurns.length === 0) {
-                const relaxedVisibleTurns = chat
-                    .map((m, index) => ({ m, index }))
-                    .filter(({ m }) => !m?.is_user && !m?.extra?.sc_ghosted && m?.mes?.trim?.().length > 0)
-                    .map(({ m, index }) => ({ index, mes: m.mes, name: m.name || 'Assistant' }));
-
-                if (relaxedVisibleTurns.length > 0) {
-                    trace('  Falling back to relaxed non-user turn detection:', relaxedVisibleTurns.length);
-                    visibleTurns = relaxedVisibleTurns;
-                }
-            }
-
+            const visibleTurns = allAssistantTurns.filter(t => !chat[t.index].extra?.sc_ghosted);
             const unsummarizedVisibleTurns = visibleTurns.filter(t => t.index > store.summarizedUpTo);
 
             trace('  allAssistantTurns:', allAssistantTurns.length);
             trace('  visibleTurns after repair:', visibleTurns.length);
             trace('  unsummarizedVisibleTurns:', unsummarizedVisibleTurns.length);
             trace('  summarizedUpTo:', store.summarizedUpTo);
-            if (unsummarizedVisibleTurns.length > 0) {
-                trace('  first unsummarized index:', unsummarizedVisibleTurns[0].index);
-                trace('  last unsummarized index:', unsummarizedVisibleTurns[unsummarizedVisibleTurns.length - 1].index);
-            }
 
             // Standard path: summarize until we are back under the verbatim window.
             if (visibleTurns.length > s.verbatimTurns) {
