@@ -917,7 +917,10 @@ async function summarizeOneBatch(visibleTurns) {
         }
 
         if (!store.layers[0]) store.layers[0] = [];
-        const passageStart = store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1;
+        const passageStart = Math.max(
+            batch[0].index,
+            store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1
+        );
 
         // ─── SANITY CHECK ───
         if (passageStart > endIdx) {
@@ -1017,7 +1020,10 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
     if (!store.layers[0]) store.layers[0] = [];
 
     // ─── FIX: Start from the message AFTER the last summarized one ───
-    const passageStart = store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1;
+    const passageStart = Math.max(
+        batch[0].index,
+        store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1
+    );
 
     trace('  passageStart:', passageStart, 'endIdx:', endIdx);
 
