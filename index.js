@@ -1966,24 +1966,46 @@ function bindUIEvents() {
 
             const allAssistantTurns = getAssistantTurns(chat);
             const visibleTurns = allAssistantTurns.filter(t => !chat[t.index].extra?.sc_ghosted);
+            const unsummarizedVisibleTurns = visibleTurns.filter(t => t.index > store.summarizedUpTo);
 
             trace('  allAssistantTurns:', allAssistantTurns.length);
             trace('  visibleTurns after repair:', visibleTurns.length);
+            trace('  unsummarizedVisibleTurns:', unsummarizedVisibleTurns.length);
+            trace('  summarizedUpTo:', store.summarizedUpTo);
 
-            if (visibleTurns.length <= s.verbatimTurns) {
-                toastr.info('Nothing to summarize — visible turns are within the verbatim limit.', 'Summaryception');
-                trace('<<< FORCE SUMMARIZE - nothing to summarize');
+            // Standard path: summarize until we are back under the verbatim window.
+            if (visibleTurns.length > s.verbatimTurns) {
+                const overflow = visibleTurns.length - s.verbatimTurns;
+                trace('  overflow turns:', overflow);
+                toastr.info(`${overflow} turns to process. Starting...`, 'Summaryception', { timeOut: 2000 });
+
+                trace('  About to call runCatchup...');
+                await runCatchup(visibleTurns, overflow);
+                trace('  runCatchup returned');
+                updateInjection();
                 return;
             }
 
-            const overflow = visibleTurns.length - s.verbatimTurns;
-            trace('  overflow turns:', overflow);
-            toastr.info(`${overflow} turns to process. Starting...`, 'Summaryception', { timeOut: 2000 });
+            // Forced path: even if currently under verbatim window, process any unsummarized visible backlog.
+            if (unsummarizedVisibleTurns.length > 0) {
+                toastr.info(
+                    `Forcing one backlog batch (${Math.min(s.turnsPerSummary, unsummarizedVisibleTurns.length)} turn${unsummarizedVisibleTurns.length > 1 ? 's' : ''})...`,
+                    'Summaryception',
+                    { timeOut: 2500 }
+                );
+                const success = await summarizeOneBatchFromTurns(unsummarizedVisibleTurns);
+                if (success) {
+                    toastr.success('Forced summarization completed.', 'Summaryception', { timeOut: 2000 });
+                    updateInjection();
+                }
+                return;
+            }
 
-            trace('  About to call runCatchup...');
-            await runCatchup(visibleTurns, overflow);
-            trace('  runCatchup returned');
-            updateInjection();
+            toastr.info(
+                `Nothing to summarize. Visible assistant turns: ${visibleTurns.length}, verbatim limit: ${s.verbatimTurns}, summarized up to index: ${store.summarizedUpTo}.`,
+                'Summaryception'
+            );
+            trace('<<< FORCE SUMMARIZE - nothing to summarize');
         } finally {
             $(this).prop('disabled', false).html('<i class="fa-solid fa-bolt"></i> Force Summarize Now');
             updateUI();
