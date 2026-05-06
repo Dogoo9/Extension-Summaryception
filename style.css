@@ -423,3 +423,130 @@
 .summaryception-connection-status.loading {
     color: #ff9800;
 }
+/* ─── Memory Database Viewer ───────────────────────────────────── */
+
+.sc-db-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+
+.sc-db-modal {
+    display: flex;
+    flex-direction: column;
+    width: min(1100px, 96vw);
+    max-height: 90vh;
+    background: var(--SmartThemeBlurTintColor, #1a1a2e);
+    color: var(--SmartThemeBodyColor, #ddd);
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 12px;
+    box-shadow: 0 12px 42px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+}
+
+.sc-db-header,
+.sc-db-toolbar,
+.sc-db-footer {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+}
+
+.sc-db-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.sc-db-header h3 {
+    margin: 0 0 4px 0;
+}
+
+.sc-db-subtitle,
+.sc-db-bank-meta,
+.sc-db-snippet-meta,
+.sc-db-bank-key {
+    opacity: 0.62;
+    font-size: 0.82em;
+}
+
+.sc-db-toolbar {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.sc-db-toolbar input {
+    flex: 1 1 260px;
+}
+
+.sc-db-body {
+    padding: 12px 16px;
+    overflow: auto;
+}
+
+.sc-db-bank,
+.sc-db-json-wrap {
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 8px;
+    margin-bottom: 10px;
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.sc-db-bank > summary,
+.sc-db-layer > summary,
+.sc-db-json-wrap > summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-weight: bold;
+}
+
+.sc-db-bank > summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.sc-db-bank-key {
+    padding: 0 10px 8px 10px;
+    word-break: break-all;
+}
+
+.sc-db-layer {
+    margin: 0 10px 10px 10px;
+    border-left: 2px solid var(--SmartThemeQuoteColor, #43b581);
+    padding-left: 8px;
+}
+
+.sc-db-snippet {
+    margin: 6px 0 8px 0;
+    padding: 8px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.16);
+}
+
+.sc-db-snippet-text {
+    margin-top: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.35;
+}
+
+.sc-db-json {
+    width: calc(100% - 20px);
+    min-height: 260px;
+    margin: 0 10px 10px 10px;
+    font-family: monospace;
+    font-size: 0.82em;
+    resize: vertical;
+}
+
+.sc-db-footer {
+    border-top: 1px solid var(--SmartThemeBorderColor, #444);
+    border-bottom: none;
+}

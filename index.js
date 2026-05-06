@@ -50,6 +50,7 @@ const defaultSettings = Object.freeze({
 
     promptPreset: 'narrative',  // 'narrative' | 'gamestate' | 'custom'
     pauseSummarization: false,  // true = stop processing, keep injecting
+    separateMemoryByCharacterCard: true,  // true = keep independent memory banks per active character card within each chat
 
     stripPatterns: [
         '<|channel>thought',
@@ -235,20 +236,139 @@ function saveSettings() {
     SillyTavern.getContext().saveSettingsDebounced();
 }
 
-function getChatStore() {
+function createEmptyChatStore() {
+    return {
+        layers: [],
+        summarizedUpTo: -1,
+        ghostedIndices: [],           // Track which messages WE ghosted
+    };
+}
+
+function normalizeChatStore(store) {
+    if (!store || typeof store !== 'object') store = createEmptyChatStore();
+    if (!Array.isArray(store.layers)) store.layers = [];
+    if (typeof store.summarizedUpTo !== 'number') store.summarizedUpTo = -1;
+    if (!Array.isArray(store.ghostedIndices)) store.ghostedIndices = [];
+    return store;
+}
+
+function getCharacterMemoryKey() {
+    const ctx = SillyTavern.getContext();
+    const id = ctx.characterId ?? ctx.this_chid ?? ctx.chid;
+    if (id !== undefined && id !== null && id !== '') return `character:${id}`;
+
+    const candidate = ctx.character?.avatar
+        || ctx.character?.name
+        || ctx.characters?.[ctx.characterId]?.avatar
+        || ctx.characters?.[ctx.characterId]?.name
+        || ctx.name2;
+
+    return candidate ? `character:${candidate}` : 'character:unknown';
+}
+
+function getCharacterMemoryLabel() {
+    const ctx = SillyTavern.getContext();
+    return ctx.character?.name
+        || ctx.characters?.[ctx.characterId]?.name
+        || ctx.name2
+        || 'Unknown character';
+}
+
+function looksLikeLegacyStore(root) {
+    return root && (
+        Array.isArray(root.layers)
+        || typeof root.summarizedUpTo === 'number'
+        || Array.isArray(root.ghostedIndices)
+    );
+}
+
+function getMemoryRoot() {
     const { chatMetadata } = SillyTavern.getContext();
     if (!chatMetadata[MODULE_NAME]) {
+        chatMetadata[MODULE_NAME] = createEmptyChatStore();
+    }
+
+    const root = chatMetadata[MODULE_NAME];
+    if (!getSettings().separateMemoryByCharacterCard) {
+        if (root?.memories) {
+            const sharedSourceKey = root.activeMemoryKey || getCharacterMemoryKey();
+            if (!root.sharedMemory) {
+                root.sharedMemory = root.memories[sharedSourceKey] || createEmptyChatStore();
+            }
+            return normalizeChatStore(root.sharedMemory);
+        }
+        return normalizeChatStore(root);
+    }
+
+    const activeKey = getCharacterMemoryKey();
+
+    // Migration: older Summaryception saves stored one memory bank directly in chatMetadata[MODULE_NAME].
+    // Keep that bank for the currently active card, then use a keyed map for future cards.
+    if (looksLikeLegacyStore(root)) {
+        const migratedStore = normalizeChatStore({
+            layers: root.layers,
+            summarizedUpTo: root.summarizedUpTo,
+            ghostedIndices: root.ghostedIndices,
+        });
+
         chatMetadata[MODULE_NAME] = {
-            layers: [],
-            summarizedUpTo: -1,
-            ghostedIndices: [],           // Track which messages WE ghosted
+            version: 2,
+            memoryMode: 'perCharacterCard',
+            activeMemoryKey: activeKey,
+            memories: {
+                [activeKey]: migratedStore,
+            },
         };
     }
-    // Migration: add ghostedIndices if missing from older saves
-    if (!chatMetadata[MODULE_NAME].ghostedIndices) {
-        chatMetadata[MODULE_NAME].ghostedIndices = [];
+
+    const memoryRoot = chatMetadata[MODULE_NAME];
+    if (!memoryRoot.memories || typeof memoryRoot.memories !== 'object') {
+        memoryRoot.memories = {};
     }
-    return chatMetadata[MODULE_NAME];
+    if (!memoryRoot.memories[activeKey]) {
+        memoryRoot.memories[activeKey] = createEmptyChatStore();
+    }
+    if (!memoryRoot.memoryLabels || typeof memoryRoot.memoryLabels !== 'object') {
+        memoryRoot.memoryLabels = {};
+    }
+    memoryRoot.memoryLabels[activeKey] = getCharacterMemoryLabel();
+
+    memoryRoot.version = 2;
+    memoryRoot.memoryMode = 'perCharacterCard';
+    memoryRoot.activeMemoryKey = activeKey;
+
+    return normalizeChatStore(memoryRoot.memories[activeKey]);
+}
+
+function getChatStore() {
+    return getMemoryRoot();
+}
+
+function getAllMemoryStores() {
+    const { chatMetadata } = SillyTavern.getContext();
+    const root = chatMetadata[MODULE_NAME];
+    if (getSettings().separateMemoryByCharacterCard && root?.memories) {
+        return Object.entries(root.memories).map(([key, store]) => [key, normalizeChatStore(store)]);
+    }
+    return [['chat', getChatStore()]];
+}
+
+async function activateCharacterMemoryStore() {
+    const s = getSettings();
+    if (!s.separateMemoryByCharacterCard) return;
+
+    const { chatMetadata } = SillyTavern.getContext();
+    const previousKey = chatMetadata[MODULE_NAME]?.activeMemoryKey;
+    const nextKey = getCharacterMemoryKey();
+
+    if (previousKey && previousKey !== nextKey) {
+        await unghostAllMessages(chatMetadata[MODULE_NAME]?.memories?.[previousKey]);
+    }
+
+    const store = getChatStore();
+    if (store.summarizedUpTo >= 0) {
+        await ghostMessagesUpTo(store.summarizedUpTo);
+    }
 }
 
 async function saveChatStore() {
@@ -346,9 +466,9 @@ async function ghostMessage(messageIndex) {
     log(`Ghosted message at index ${messageIndex}`);
 }
 
-async function unghostAllMessages() {
+async function unghostAllMessages(storeOverride = null) {
     const { chat } = SillyTavern.getContext();
-    const store = getChatStore();
+    const store = storeOverride ? normalizeChatStore(storeOverride) : getChatStore();
 
     // Only unhide messages that WE ghosted, not user-hidden messages
     const toUnhide = store.ghostedIndices && store.ghostedIndices.length > 0
@@ -1420,7 +1540,8 @@ function onMessageReceived(messageIndex) {
 function onChatChanged() {
     log('Chat changed.');
     catchupDismissed = false;
-    setTimeout(() => {
+    setTimeout(async () => {
+        await activateCharacterMemoryStore();
         updateInjection();
         updateUI();
     }, 100);
@@ -1448,6 +1569,11 @@ function registerSlashCommands() {
             callback: () => {
                 const store = getChatStore();
                 const lines = ['**Summaryception Status**'];
+                lines.push(`Memory mode: ${getSettings().separateMemoryByCharacterCard ? 'per character card' : 'per chat'}`);
+                if (getSettings().separateMemoryByCharacterCard) {
+                    lines.push(`Active card: ${getCharacterMemoryLabel()} (${getCharacterMemoryKey()})`);
+                    lines.push(`Memory banks in this chat: ${getAllMemoryStores().length}`);
+                }
                 lines.push(`Summarized up to index: ${store.summarizedUpTo}`);
                 if (store.layers) {
                     for (let i = 0; i < store.layers.length; i++) {
@@ -1472,9 +1598,6 @@ function registerSlashCommands() {
                 store.summarizedUpTo = -1;
                 store.ghostedIndices = [];
 
-                const { chatMetadata } = SillyTavern.getContext();
-                chatMetadata[MODULE_NAME] = store;
-
                 await saveChatStore();
                 try {
                     const ctx2 = SillyTavern.getContext();
@@ -1496,6 +1619,16 @@ function registerSlashCommands() {
             },
             helpString: 'Preview the summary block that would be injected',
         }));
+
+
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'sc-db',
+            callback: () => {
+                showMemoryDatabaseModal();
+                return 'Opened Summaryception memory database viewer.';
+            },
+            helpString: 'Open the Summaryception memory database viewer',
+        }));
     } catch (e) {
         log('Could not register slash commands:', e);
     }
@@ -1510,6 +1643,7 @@ function updateUI() {
 
         $('#sc_enabled').prop('checked', s.enabled);
         $('#sc_pause_summarization').prop('checked', s.pauseSummarization);
+        $('#sc_separate_by_character').prop('checked', s.separateMemoryByCharacterCard);
         $('#sc_verbatim_turns').val(s.verbatimTurns);
         $('#sc_verbatim_turns_val').text(s.verbatimTurns);
         $('#sc_turns_per_summary').val(s.turnsPerSummary);
@@ -1555,6 +1689,10 @@ function updateUI() {
         } catch (e) { /* no chat loaded */ }
 
         let statsHtml = '';
+        if (s.separateMemoryByCharacterCard) {
+            statsHtml += `<div class="sc-layer-stat">🃏 Active card memory: <strong>${escapeHtml(getCharacterMemoryLabel())}</strong></div>`;
+            statsHtml += `<div class="sc-layer-stat sc-muted">Memory banks in this chat: ${getAllMemoryStores().length}</div>`;
+        }
         statsHtml += `<div class="sc-layer-stat">👻 <strong>${ghostedCount}</strong> messages ghosted (hidden from LLM, visible to you)</div>`;
         if (store.layers) {
             for (let i = store.layers.length - 1; i >= 0; i--) {
@@ -1581,6 +1719,179 @@ function updateUI() {
     } catch (e) {
         log('updateUI error:', e);
     }
+}
+
+function getMemoryBankLabel(key) {
+    const { chatMetadata } = SillyTavern.getContext();
+    const root = chatMetadata[MODULE_NAME];
+    if (root?.memoryLabels?.[key]) return root.memoryLabels[key];
+    if (key === getCharacterMemoryKey()) return getCharacterMemoryLabel();
+    if (key === 'chat') return 'Shared chat memory';
+    return key.replace(/^character:/, 'Character ');
+}
+
+function getMemoryDatabaseSnapshot() {
+    const s = getSettings();
+    const activeKey = s.separateMemoryByCharacterCard ? getCharacterMemoryKey() : 'chat';
+    const banks = getAllMemoryStores().map(([key, store]) => {
+        const layers = (store.layers || []).map((layer, layerIndex) => ({
+            layerIndex,
+            snippets: (layer || []).map((snippet, snippetIndex) => ({
+                snippetIndex,
+                ...snippet,
+            })),
+        }));
+
+        return {
+            key,
+            label: getMemoryBankLabel(key),
+            active: key === activeKey || (!s.separateMemoryByCharacterCard && key === 'chat'),
+            summarizedUpTo: store.summarizedUpTo ?? -1,
+            ghostedIndices: [...(store.ghostedIndices || [])],
+            snippetCount: layers.reduce((sum, layer) => sum + layer.snippets.length, 0),
+            layers,
+        };
+    });
+
+    return {
+        generatedAt: new Date().toISOString(),
+        module: MODULE_NAME,
+        memoryMode: s.separateMemoryByCharacterCard ? 'perCharacterCard' : 'perChat',
+        activeKey,
+        activeLabel: s.separateMemoryByCharacterCard ? getCharacterMemoryLabel() : 'Shared chat memory',
+        bankCount: banks.length,
+        banks,
+    };
+}
+
+function buildMemoryDatabaseHtml(snapshot) {
+    if (!snapshot.banks.length) {
+        return '<div class="sc-muted">No memory banks found.</div>';
+    }
+
+    return snapshot.banks.map((bank) => {
+        const layerHtml = bank.layers
+            .filter(layer => layer.snippets.length > 0)
+            .map(layer => {
+                const snippetsHtml = layer.snippets.map(sn => {
+                    const rangeStr = sn.turnRange
+                        ? `turns ${sn.turnRange[0]}–${sn.turnRange[1]}`
+                        : sn.mergedCount
+                            ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
+                            : 'meta';
+                    const timestamp = sn.timestamp ? new Date(sn.timestamp).toLocaleString() : 'unknown time';
+                    const flags = [sn.promoted ? 'promoted' : '', sn.regenerated ? 'regenerated' : '']
+                        .filter(Boolean)
+                        .join(', ');
+                    return `
+                    <div class="sc-db-snippet">
+                        <div class="sc-db-snippet-meta">#${sn.snippetIndex + 1} · ${rangeStr} · ${escapeHtml(timestamp)}${flags ? ` · ${escapeHtml(flags)}` : ''}</div>
+                        <div class="sc-db-snippet-text">${escapeHtml(sn.text || '')}</div>
+                    </div>`;
+                }).join('');
+
+                return `
+                <details class="sc-db-layer" open>
+                    <summary>Layer ${layer.layerIndex} · ${layer.snippets.length} snippet${layer.snippets.length === 1 ? '' : 's'}</summary>
+                    ${snippetsHtml}
+                </details>`;
+            }).join('') || '<div class="sc-muted">No snippets in this bank yet.</div>';
+
+        return `
+        <details class="sc-db-bank" ${bank.active ? 'open' : ''} data-bank-key="${escapeHtml(bank.key)}">
+            <summary>
+                <span>${bank.active ? '🟢 ' : ''}${escapeHtml(bank.label)}</span>
+                <span class="sc-db-bank-meta">${bank.snippetCount} snippets · ${bank.ghostedIndices.length} ghosted · up to ${bank.summarizedUpTo}</span>
+            </summary>
+            <div class="sc-db-bank-key">${escapeHtml(bank.key)}</div>
+            ${layerHtml}
+        </details>`;
+    }).join('');
+}
+
+function downloadJson(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function showMemoryDatabaseModal() {
+    const snapshot = getMemoryDatabaseSnapshot();
+    const overlay = document.createElement('div');
+    overlay.className = 'sc-db-overlay';
+    overlay.innerHTML = `
+    <div class="sc-db-modal" role="dialog" aria-modal="true" aria-labelledby="sc_db_title">
+        <div class="sc-db-header">
+            <div>
+                <h3 id="sc_db_title">🧠 Summaryception Memory Database</h3>
+                <div class="sc-db-subtitle">${escapeHtml(snapshot.memoryMode)} · ${snapshot.bankCount} bank${snapshot.bankCount === 1 ? '' : 's'} · active: ${escapeHtml(snapshot.activeLabel)}</div>
+            </div>
+            <button class="menu_button sc-db-close" title="Close"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="sc-db-toolbar">
+            <input id="sc_db_filter" class="text_pole" type="search" placeholder="Filter banks and snippets..." />
+            <button id="sc_db_copy" class="menu_button"><i class="fa-solid fa-copy"></i> Copy JSON</button>
+            <button id="sc_db_export_all" class="menu_button"><i class="fa-solid fa-file-export"></i> Export All</button>
+        </div>
+        <div class="sc-db-body">
+            <div id="sc_db_rendered" class="sc-db-rendered">${buildMemoryDatabaseHtml(snapshot)}</div>
+            <details class="sc-db-json-wrap">
+                <summary>Raw JSON snapshot</summary>
+                <textarea id="sc_db_json" class="text_pole sc-db-json" readonly>${escapeHtml(JSON.stringify(snapshot, null, 2))}</textarea>
+            </details>
+        </div>
+        <div class="sc-db-footer sc-muted">
+            This viewer uses the memory already stored in chat metadata. No external vector database is required for Summaryception's ordered summaries.
+        </div>
+    </div>`;
+
+    const close = () => {
+        document.removeEventListener('keydown', keyHandler);
+        overlay.remove();
+    };
+    const keyHandler = (event) => {
+        if (event.key === 'Escape') close();
+    };
+    overlay.querySelector('.sc-db-close').addEventListener('click', close);
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) close();
+    });
+
+    document.addEventListener('keydown', keyHandler);
+
+    overlay.querySelector('#sc_db_filter').addEventListener('input', (event) => {
+        const needle = event.target.value.trim().toLowerCase();
+        for (const bankEl of overlay.querySelectorAll('.sc-db-bank')) {
+            const matches = !needle || bankEl.textContent.toLowerCase().includes(needle);
+            bankEl.style.display = matches ? '' : 'none';
+            if (matches && needle) bankEl.open = true;
+        }
+    });
+
+    overlay.querySelector('#sc_db_copy').addEventListener('click', async () => {
+        const json = JSON.stringify(snapshot, null, 2);
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(json);
+        } else {
+            const textarea = overlay.querySelector('#sc_db_json');
+            textarea.focus();
+            textarea.select();
+            document.execCommand('copy');
+        }
+        toastr.success('Memory database JSON copied.', 'Summaryception', { timeOut: 2000 });
+    });
+
+    overlay.querySelector('#sc_db_export_all').addEventListener('click', () => {
+        downloadJson(`summaryception_memory_database_${Date.now()}.json`, snapshot);
+        toastr.success('Memory database exported.', 'Summaryception', { timeOut: 2000 });
+    });
+
+    document.body.appendChild(overlay);
+    overlay.querySelector('#sc_db_filter').focus();
 }
 
 function updateSnippetBrowser() {
@@ -1806,6 +2117,22 @@ function bindUIEvents() {
         }
     });
 
+    $('#sc_separate_by_character').on('change', async function () {
+        const s = getSettings();
+        s.separateMemoryByCharacterCard = $(this).prop('checked');
+        saveSettings();
+        await activateCharacterMemoryStore();
+        updateInjection();
+        updateUI();
+        toastr.info(
+            s.separateMemoryByCharacterCard
+                ? 'Character-card memory separation enabled for this chat. The active card now has its own memory bank.'
+                : 'Character-card memory separation disabled. This chat will use one shared memory bank.',
+            'Summaryception',
+            { timeOut: 5000 }
+        );
+    });
+
     $('#sc_summarizer_response_length').on('input', function () {
         getSettings().summarizerResponseLength = parseInt($(this).val(), 10) || 0;
         saveSettings();
@@ -1914,6 +2241,30 @@ function bindUIEvents() {
         } else {
             toastr.info('No orphaned messages found.', 'Summaryception', { timeOut: 3000 });
         }
+    });
+
+
+    $('#sc_view_database').on('click', function () {
+        showMemoryDatabaseModal();
+    });
+
+    $('#sc_clear_memory').on('click', async function () {
+        if (!confirm('Clear Summaryception memory for the active memory bank and unghost its messages?')) return;
+        await unghostAllMessages();
+        const store = getChatStore();
+        store.layers.length = 0;
+        store.summarizedUpTo = -1;
+        store.ghostedIndices = [];
+        await saveChatStore();
+        try {
+            const ctx = SillyTavern.getContext();
+            if (ctx.saveChat) await ctx.saveChat();
+        } catch (e) {
+            log('Could not save chat:', e);
+        }
+        updateInjection();
+        updateUI();
+        toastr.success('Active Summaryception memory cleared and messages unghosted.', 'Summaryception');
     });
 
     $('#sc_force_summarize').on('click', async function () {
