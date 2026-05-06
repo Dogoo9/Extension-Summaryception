@@ -328,10 +328,6 @@ function getMemoryRoot() {
     if (!memoryRoot.memories[activeKey]) {
         memoryRoot.memories[activeKey] = createEmptyChatStore();
     }
-    if (!memoryRoot.memoryLabels || typeof memoryRoot.memoryLabels !== 'object') {
-        memoryRoot.memoryLabels = {};
-    }
-    memoryRoot.memoryLabels[activeKey] = getCharacterMemoryLabel();
 
     memoryRoot.version = 2;
     memoryRoot.memoryMode = 'perCharacterCard';
@@ -2243,10 +2239,6 @@ function bindUIEvents() {
         }
     });
 
-
-    $('#sc_view_database').on('click', function () {
-        showMemoryDatabaseModal();
-    });
 
     $('#sc_clear_memory').on('click', async function () {
         if (!confirm('Clear Summaryception memory for the active memory bank and unghost its messages?')) return;

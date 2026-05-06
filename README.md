@@ -218,9 +218,9 @@ Plus fully customizable:
 
 ## 🃏 Per-Character Memory Banks
 
-Summaryception can keep memory separated by the active character card inside each chat. When **Separate memory per character card** is enabled, the extension stores the current card's summaries in its own memory bank under the chat metadata. Switching to another card in the same chat selects that card's bank, so injected summaries, the snippet browser, exports, imports, the memory database viewer, and `/sc-status` all operate on the active card's memory.
+Summaryception can keep memory separated by the active character card inside each chat. When **Separate memory per character card** is enabled, the extension stores the current card's summaries in its own memory bank under the chat metadata. Switching to another card in the same chat selects that card's bank, so injected summaries, the snippet browser, exports, imports, and `/sc-status` all operate on the active card's memory.
 
-Existing single-bank memories are migrated automatically to the currently active card the first time the feature is used. No external database such as Qdrant is required for this feature because Summaryception's ordered, layered summaries already live in SillyTavern chat metadata; the viewer simply exposes that database in the UI.
+Existing single-bank memories are migrated automatically to the currently active card the first time the feature is used.
 
 ### Limitations
 
@@ -250,7 +250,6 @@ Summaryception can use different backends for summarization, independent of your
 - **Layer Stats** — Live view of snippet counts per layer, active character-card bank, and ghosted message count
 - **Injection Preview** — See exactly what gets sent to the LLM
 - **Snippet Browser** — Browse, edit, regenerate, and delete individual snippets across all layers
-- **Memory Database Viewer** — Open a full-screen searchable popup showing all memory banks, layers, snippets, ghosted indices, and raw JSON
 - **Export/Import** — Save and restore the active memory bank as JSON
 - **Force Summarize** — Manually trigger summarization
 - **Stop** — Abort any running summarization, progress saved
