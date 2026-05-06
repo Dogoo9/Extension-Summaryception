@@ -1615,6 +1615,16 @@ function registerSlashCommands() {
             },
             helpString: 'Preview the summary block that would be injected',
         }));
+
+
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'sc-db',
+            callback: () => {
+                showMemoryDatabaseModal();
+                return 'Opened Summaryception memory database viewer.';
+            },
+            helpString: 'Open the Summaryception memory database viewer',
+        }));
     } catch (e) {
         log('Could not register slash commands:', e);
     }
@@ -1705,6 +1715,179 @@ function updateUI() {
     } catch (e) {
         log('updateUI error:', e);
     }
+}
+
+function getMemoryBankLabel(key) {
+    const { chatMetadata } = SillyTavern.getContext();
+    const root = chatMetadata[MODULE_NAME];
+    if (root?.memoryLabels?.[key]) return root.memoryLabels[key];
+    if (key === getCharacterMemoryKey()) return getCharacterMemoryLabel();
+    if (key === 'chat') return 'Shared chat memory';
+    return key.replace(/^character:/, 'Character ');
+}
+
+function getMemoryDatabaseSnapshot() {
+    const s = getSettings();
+    const activeKey = s.separateMemoryByCharacterCard ? getCharacterMemoryKey() : 'chat';
+    const banks = getAllMemoryStores().map(([key, store]) => {
+        const layers = (store.layers || []).map((layer, layerIndex) => ({
+            layerIndex,
+            snippets: (layer || []).map((snippet, snippetIndex) => ({
+                snippetIndex,
+                ...snippet,
+            })),
+        }));
+
+        return {
+            key,
+            label: getMemoryBankLabel(key),
+            active: key === activeKey || (!s.separateMemoryByCharacterCard && key === 'chat'),
+            summarizedUpTo: store.summarizedUpTo ?? -1,
+            ghostedIndices: [...(store.ghostedIndices || [])],
+            snippetCount: layers.reduce((sum, layer) => sum + layer.snippets.length, 0),
+            layers,
+        };
+    });
+
+    return {
+        generatedAt: new Date().toISOString(),
+        module: MODULE_NAME,
+        memoryMode: s.separateMemoryByCharacterCard ? 'perCharacterCard' : 'perChat',
+        activeKey,
+        activeLabel: s.separateMemoryByCharacterCard ? getCharacterMemoryLabel() : 'Shared chat memory',
+        bankCount: banks.length,
+        banks,
+    };
+}
+
+function buildMemoryDatabaseHtml(snapshot) {
+    if (!snapshot.banks.length) {
+        return '<div class="sc-muted">No memory banks found.</div>';
+    }
+
+    return snapshot.banks.map((bank) => {
+        const layerHtml = bank.layers
+            .filter(layer => layer.snippets.length > 0)
+            .map(layer => {
+                const snippetsHtml = layer.snippets.map(sn => {
+                    const rangeStr = sn.turnRange
+                        ? `turns ${sn.turnRange[0]}–${sn.turnRange[1]}`
+                        : sn.mergedCount
+                            ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
+                            : 'meta';
+                    const timestamp = sn.timestamp ? new Date(sn.timestamp).toLocaleString() : 'unknown time';
+                    const flags = [sn.promoted ? 'promoted' : '', sn.regenerated ? 'regenerated' : '']
+                        .filter(Boolean)
+                        .join(', ');
+                    return `
+                    <div class="sc-db-snippet">
+                        <div class="sc-db-snippet-meta">#${sn.snippetIndex + 1} · ${rangeStr} · ${escapeHtml(timestamp)}${flags ? ` · ${escapeHtml(flags)}` : ''}</div>
+                        <div class="sc-db-snippet-text">${escapeHtml(sn.text || '')}</div>
+                    </div>`;
+                }).join('');
+
+                return `
+                <details class="sc-db-layer" open>
+                    <summary>Layer ${layer.layerIndex} · ${layer.snippets.length} snippet${layer.snippets.length === 1 ? '' : 's'}</summary>
+                    ${snippetsHtml}
+                </details>`;
+            }).join('') || '<div class="sc-muted">No snippets in this bank yet.</div>';
+
+        return `
+        <details class="sc-db-bank" ${bank.active ? 'open' : ''} data-bank-key="${escapeHtml(bank.key)}">
+            <summary>
+                <span>${bank.active ? '🟢 ' : ''}${escapeHtml(bank.label)}</span>
+                <span class="sc-db-bank-meta">${bank.snippetCount} snippets · ${bank.ghostedIndices.length} ghosted · up to ${bank.summarizedUpTo}</span>
+            </summary>
+            <div class="sc-db-bank-key">${escapeHtml(bank.key)}</div>
+            ${layerHtml}
+        </details>`;
+    }).join('');
+}
+
+function downloadJson(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function showMemoryDatabaseModal() {
+    const snapshot = getMemoryDatabaseSnapshot();
+    const overlay = document.createElement('div');
+    overlay.className = 'sc-db-overlay';
+    overlay.innerHTML = `
+    <div class="sc-db-modal" role="dialog" aria-modal="true" aria-labelledby="sc_db_title">
+        <div class="sc-db-header">
+            <div>
+                <h3 id="sc_db_title">🧠 Summaryception Memory Database</h3>
+                <div class="sc-db-subtitle">${escapeHtml(snapshot.memoryMode)} · ${snapshot.bankCount} bank${snapshot.bankCount === 1 ? '' : 's'} · active: ${escapeHtml(snapshot.activeLabel)}</div>
+            </div>
+            <button class="menu_button sc-db-close" title="Close"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="sc-db-toolbar">
+            <input id="sc_db_filter" class="text_pole" type="search" placeholder="Filter banks and snippets..." />
+            <button id="sc_db_copy" class="menu_button"><i class="fa-solid fa-copy"></i> Copy JSON</button>
+            <button id="sc_db_export_all" class="menu_button"><i class="fa-solid fa-file-export"></i> Export All</button>
+        </div>
+        <div class="sc-db-body">
+            <div id="sc_db_rendered" class="sc-db-rendered">${buildMemoryDatabaseHtml(snapshot)}</div>
+            <details class="sc-db-json-wrap">
+                <summary>Raw JSON snapshot</summary>
+                <textarea id="sc_db_json" class="text_pole sc-db-json" readonly>${escapeHtml(JSON.stringify(snapshot, null, 2))}</textarea>
+            </details>
+        </div>
+        <div class="sc-db-footer sc-muted">
+            This viewer uses the memory already stored in chat metadata. No external vector database is required for Summaryception's ordered summaries.
+        </div>
+    </div>`;
+
+    const close = () => {
+        document.removeEventListener('keydown', keyHandler);
+        overlay.remove();
+    };
+    const keyHandler = (event) => {
+        if (event.key === 'Escape') close();
+    };
+    overlay.querySelector('.sc-db-close').addEventListener('click', close);
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) close();
+    });
+
+    document.addEventListener('keydown', keyHandler);
+
+    overlay.querySelector('#sc_db_filter').addEventListener('input', (event) => {
+        const needle = event.target.value.trim().toLowerCase();
+        for (const bankEl of overlay.querySelectorAll('.sc-db-bank')) {
+            const matches = !needle || bankEl.textContent.toLowerCase().includes(needle);
+            bankEl.style.display = matches ? '' : 'none';
+            if (matches && needle) bankEl.open = true;
+        }
+    });
+
+    overlay.querySelector('#sc_db_copy').addEventListener('click', async () => {
+        const json = JSON.stringify(snapshot, null, 2);
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(json);
+        } else {
+            const textarea = overlay.querySelector('#sc_db_json');
+            textarea.focus();
+            textarea.select();
+            document.execCommand('copy');
+        }
+        toastr.success('Memory database JSON copied.', 'Summaryception', { timeOut: 2000 });
+    });
+
+    overlay.querySelector('#sc_db_export_all').addEventListener('click', () => {
+        downloadJson(`summaryception_memory_database_${Date.now()}.json`, snapshot);
+        toastr.success('Memory database exported.', 'Summaryception', { timeOut: 2000 });
+    });
+
+    document.body.appendChild(overlay);
+    overlay.querySelector('#sc_db_filter').focus();
 }
 
 function updateSnippetBrowser() {
