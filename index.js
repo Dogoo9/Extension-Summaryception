@@ -50,6 +50,7 @@ const defaultSettings = Object.freeze({
 
     promptPreset: 'narrative',  // 'narrative' | 'gamestate' | 'custom'
     pauseSummarization: false,  // true = stop processing, keep injecting
+    separateMemoryByCharacterCard: true,  // true = keep independent memory banks per active character card within each chat
 
     stripPatterns: [
         '<|channel>thought',
@@ -235,20 +236,135 @@ function saveSettings() {
     SillyTavern.getContext().saveSettingsDebounced();
 }
 
-function getChatStore() {
+function createEmptyChatStore() {
+    return {
+        layers: [],
+        summarizedUpTo: -1,
+        ghostedIndices: [],           // Track which messages WE ghosted
+    };
+}
+
+function normalizeChatStore(store) {
+    if (!store || typeof store !== 'object') store = createEmptyChatStore();
+    if (!Array.isArray(store.layers)) store.layers = [];
+    if (typeof store.summarizedUpTo !== 'number') store.summarizedUpTo = -1;
+    if (!Array.isArray(store.ghostedIndices)) store.ghostedIndices = [];
+    return store;
+}
+
+function getCharacterMemoryKey() {
+    const ctx = SillyTavern.getContext();
+    const id = ctx.characterId ?? ctx.this_chid ?? ctx.chid;
+    if (id !== undefined && id !== null && id !== '') return `character:${id}`;
+
+    const candidate = ctx.character?.avatar
+        || ctx.character?.name
+        || ctx.characters?.[ctx.characterId]?.avatar
+        || ctx.characters?.[ctx.characterId]?.name
+        || ctx.name2;
+
+    return candidate ? `character:${candidate}` : 'character:unknown';
+}
+
+function getCharacterMemoryLabel() {
+    const ctx = SillyTavern.getContext();
+    return ctx.character?.name
+        || ctx.characters?.[ctx.characterId]?.name
+        || ctx.name2
+        || 'Unknown character';
+}
+
+function looksLikeLegacyStore(root) {
+    return root && (
+        Array.isArray(root.layers)
+        || typeof root.summarizedUpTo === 'number'
+        || Array.isArray(root.ghostedIndices)
+    );
+}
+
+function getMemoryRoot() {
     const { chatMetadata } = SillyTavern.getContext();
     if (!chatMetadata[MODULE_NAME]) {
+        chatMetadata[MODULE_NAME] = createEmptyChatStore();
+    }
+
+    const root = chatMetadata[MODULE_NAME];
+    if (!getSettings().separateMemoryByCharacterCard) {
+        if (root?.memories) {
+            const sharedSourceKey = root.activeMemoryKey || getCharacterMemoryKey();
+            if (!root.sharedMemory) {
+                root.sharedMemory = root.memories[sharedSourceKey] || createEmptyChatStore();
+            }
+            return normalizeChatStore(root.sharedMemory);
+        }
+        return normalizeChatStore(root);
+    }
+
+    const activeKey = getCharacterMemoryKey();
+
+    // Migration: older Summaryception saves stored one memory bank directly in chatMetadata[MODULE_NAME].
+    // Keep that bank for the currently active card, then use a keyed map for future cards.
+    if (looksLikeLegacyStore(root)) {
+        const migratedStore = normalizeChatStore({
+            layers: root.layers,
+            summarizedUpTo: root.summarizedUpTo,
+            ghostedIndices: root.ghostedIndices,
+        });
+
         chatMetadata[MODULE_NAME] = {
-            layers: [],
-            summarizedUpTo: -1,
-            ghostedIndices: [],           // Track which messages WE ghosted
+            version: 2,
+            memoryMode: 'perCharacterCard',
+            activeMemoryKey: activeKey,
+            memories: {
+                [activeKey]: migratedStore,
+            },
         };
     }
-    // Migration: add ghostedIndices if missing from older saves
-    if (!chatMetadata[MODULE_NAME].ghostedIndices) {
-        chatMetadata[MODULE_NAME].ghostedIndices = [];
+
+    const memoryRoot = chatMetadata[MODULE_NAME];
+    if (!memoryRoot.memories || typeof memoryRoot.memories !== 'object') {
+        memoryRoot.memories = {};
     }
-    return chatMetadata[MODULE_NAME];
+    if (!memoryRoot.memories[activeKey]) {
+        memoryRoot.memories[activeKey] = createEmptyChatStore();
+    }
+
+    memoryRoot.version = 2;
+    memoryRoot.memoryMode = 'perCharacterCard';
+    memoryRoot.activeMemoryKey = activeKey;
+
+    return normalizeChatStore(memoryRoot.memories[activeKey]);
+}
+
+function getChatStore() {
+    return getMemoryRoot();
+}
+
+function getAllMemoryStores() {
+    const { chatMetadata } = SillyTavern.getContext();
+    const root = chatMetadata[MODULE_NAME];
+    if (getSettings().separateMemoryByCharacterCard && root?.memories) {
+        return Object.entries(root.memories).map(([key, store]) => [key, normalizeChatStore(store)]);
+    }
+    return [['chat', getChatStore()]];
+}
+
+async function activateCharacterMemoryStore() {
+    const s = getSettings();
+    if (!s.separateMemoryByCharacterCard) return;
+
+    const { chatMetadata } = SillyTavern.getContext();
+    const previousKey = chatMetadata[MODULE_NAME]?.activeMemoryKey;
+    const nextKey = getCharacterMemoryKey();
+
+    if (previousKey && previousKey !== nextKey) {
+        await unghostAllMessages(chatMetadata[MODULE_NAME]?.memories?.[previousKey]);
+    }
+
+    const store = getChatStore();
+    if (store.summarizedUpTo >= 0) {
+        await ghostMessagesUpTo(store.summarizedUpTo);
+    }
 }
 
 async function saveChatStore() {
@@ -346,9 +462,9 @@ async function ghostMessage(messageIndex) {
     log(`Ghosted message at index ${messageIndex}`);
 }
 
-async function unghostAllMessages() {
+async function unghostAllMessages(storeOverride = null) {
     const { chat } = SillyTavern.getContext();
-    const store = getChatStore();
+    const store = storeOverride ? normalizeChatStore(storeOverride) : getChatStore();
 
     // Only unhide messages that WE ghosted, not user-hidden messages
     const toUnhide = store.ghostedIndices && store.ghostedIndices.length > 0
@@ -1420,7 +1536,8 @@ function onMessageReceived(messageIndex) {
 function onChatChanged() {
     log('Chat changed.');
     catchupDismissed = false;
-    setTimeout(() => {
+    setTimeout(async () => {
+        await activateCharacterMemoryStore();
         updateInjection();
         updateUI();
     }, 100);
@@ -1448,6 +1565,11 @@ function registerSlashCommands() {
             callback: () => {
                 const store = getChatStore();
                 const lines = ['**Summaryception Status**'];
+                lines.push(`Memory mode: ${getSettings().separateMemoryByCharacterCard ? 'per character card' : 'per chat'}`);
+                if (getSettings().separateMemoryByCharacterCard) {
+                    lines.push(`Active card: ${getCharacterMemoryLabel()} (${getCharacterMemoryKey()})`);
+                    lines.push(`Memory banks in this chat: ${getAllMemoryStores().length}`);
+                }
                 lines.push(`Summarized up to index: ${store.summarizedUpTo}`);
                 if (store.layers) {
                     for (let i = 0; i < store.layers.length; i++) {
@@ -1471,9 +1593,6 @@ function registerSlashCommands() {
                 store.layers.length = 0;
                 store.summarizedUpTo = -1;
                 store.ghostedIndices = [];
-
-                const { chatMetadata } = SillyTavern.getContext();
-                chatMetadata[MODULE_NAME] = store;
 
                 await saveChatStore();
                 try {
@@ -1510,6 +1629,7 @@ function updateUI() {
 
         $('#sc_enabled').prop('checked', s.enabled);
         $('#sc_pause_summarization').prop('checked', s.pauseSummarization);
+        $('#sc_separate_by_character').prop('checked', s.separateMemoryByCharacterCard);
         $('#sc_verbatim_turns').val(s.verbatimTurns);
         $('#sc_verbatim_turns_val').text(s.verbatimTurns);
         $('#sc_turns_per_summary').val(s.turnsPerSummary);
@@ -1555,6 +1675,10 @@ function updateUI() {
         } catch (e) { /* no chat loaded */ }
 
         let statsHtml = '';
+        if (s.separateMemoryByCharacterCard) {
+            statsHtml += `<div class="sc-layer-stat">🃏 Active card memory: <strong>${escapeHtml(getCharacterMemoryLabel())}</strong></div>`;
+            statsHtml += `<div class="sc-layer-stat sc-muted">Memory banks in this chat: ${getAllMemoryStores().length}</div>`;
+        }
         statsHtml += `<div class="sc-layer-stat">👻 <strong>${ghostedCount}</strong> messages ghosted (hidden from LLM, visible to you)</div>`;
         if (store.layers) {
             for (let i = store.layers.length - 1; i >= 0; i--) {
@@ -1806,6 +1930,22 @@ function bindUIEvents() {
         }
     });
 
+    $('#sc_separate_by_character').on('change', async function () {
+        const s = getSettings();
+        s.separateMemoryByCharacterCard = $(this).prop('checked');
+        saveSettings();
+        await activateCharacterMemoryStore();
+        updateInjection();
+        updateUI();
+        toastr.info(
+            s.separateMemoryByCharacterCard
+                ? 'Character-card memory separation enabled for this chat. The active card now has its own memory bank.'
+                : 'Character-card memory separation disabled. This chat will use one shared memory bank.',
+            'Summaryception',
+            { timeOut: 5000 }
+        );
+    });
+
     $('#sc_summarizer_response_length').on('input', function () {
         getSettings().summarizerResponseLength = parseInt($(this).val(), 10) || 0;
         saveSettings();
@@ -1914,6 +2054,26 @@ function bindUIEvents() {
         } else {
             toastr.info('No orphaned messages found.', 'Summaryception', { timeOut: 3000 });
         }
+    });
+
+
+    $('#sc_clear_memory').on('click', async function () {
+        if (!confirm('Clear Summaryception memory for the active memory bank and unghost its messages?')) return;
+        await unghostAllMessages();
+        const store = getChatStore();
+        store.layers.length = 0;
+        store.summarizedUpTo = -1;
+        store.ghostedIndices = [];
+        await saveChatStore();
+        try {
+            const ctx = SillyTavern.getContext();
+            if (ctx.saveChat) await ctx.saveChat();
+        } catch (e) {
+            log('Could not save chat:', e);
+        }
+        updateInjection();
+        updateUI();
+        toastr.success('Active Summaryception memory cleared and messages unghosted.', 'Summaryception');
     });
 
     $('#sc_force_summarize').on('click', async function () {
