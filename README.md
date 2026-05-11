@@ -1,5 +1,9 @@
 # 🧠 Summaryception
 
+This is a fork of https://github.com/Lodactio/Extension-Summaryception repo, primary used by me for my own personal roleplay using GPT codex to assist with programming (I suck at it.). Feel free to take features from this fork or use them in any way you like.
+
+Additions so far include a dedicated KoboldCPP connection source and per chat memory database for each character.
+
 ### Layered Recursive Memory for SillyTavern
 
 > Your AI remembers **thousands of turns** in under **20k tokens**. No context bloat. No lost plot threads. No compromises.
@@ -297,7 +301,9 @@ Restart SillyTavern and enable the extension.
 
 Built with frustration at context limits and love for long-form roleplay.
 
-If this saves your 500-turn adventure from amnesia, consider starring the repo. ⭐
+Thank you to Lodactio for creating this fantastic tool! All credit goes to them for this awesome tool.
+
+If this saves your 500-turn adventure from amnesia, consider starring (https://github.com/Lodactio/Extension-Summaryception) repo. ⭐
 
 ---
 
