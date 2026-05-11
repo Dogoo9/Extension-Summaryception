@@ -236,6 +236,23 @@ function saveSettings() {
     SillyTavern.getContext().saveSettingsDebounced();
 }
 
+function clearPersistentToast(toast) {
+    if (!toast) return;
+    try {
+        toastr.clear(toast);
+    } catch (e) {
+        log('Could not clear persistent toast:', e);
+    }
+
+    // Some SillyTavern/toastr builds leave no-timeout progress toasts in the DOM
+    // after the task completes. Remove the returned toast element as a fallback.
+    try {
+        $(toast).remove();
+    } catch (e) {
+        log('Could not remove persistent toast element:', e);
+    }
+}
+
 function createEmptyChatStore() {
     return {
         layers: [],
@@ -383,26 +400,61 @@ function getChatStore() {
 function getAllMemoryStores() {
     const { chatMetadata } = SillyTavern.getContext();
     const root = chatMetadata[MODULE_NAME];
-    if (getSettings().separateMemoryByCharacterCard && root?.memories) {
-        return Object.entries(root.memories).map(([key, store]) => [key, normalizeChatStore(store)]);
+    const entries = new Map();
+
+    const addEntry = (key, store) => {
+        if (!key || entries.has(key)) return;
+        entries.set(key, normalizeChatStore(store || createEmptyChatStore()));
+    };
+
+    // Always include every per-character bank saved in this chat's Summaryception
+    // metadata, even when the user is currently in shared per-chat mode. The
+    // database viewer is an audit/export surface, so hiding inactive banks makes
+    // saved memories look missing.
+    if (root?.memories && typeof root.memories === 'object') {
+        for (const [key, store] of Object.entries(root.memories)) {
+            addEntry(key, store);
+        }
     }
-    return [['chat', getChatStore()]];
+
+    // Preserve labels/attachments for cards that were seen before but do not yet
+    // have snippets, so the viewer can still list all known character banks.
+    for (const key of Object.keys(root?.memoryLabels || {})) {
+        addEntry(key, root?.memories?.[key]);
+    }
+    for (const key of Object.keys(root?.memoryAttachments || {})) {
+        addEntry(key, root?.memories?.[key]);
+    }
+
+    if (root?.sharedMemory) {
+        addEntry('chat', root.sharedMemory);
+    } else if (looksLikeLegacyStore(root)) {
+        addEntry('chat', root);
+    }
+
+    if (entries.size === 0) {
+        const activeKey = getSettings().separateMemoryByCharacterCard ? getCharacterMemoryKey() : 'chat';
+        addEntry(activeKey, getChatStore());
+    }
+
+    return [...entries.entries()];
 }
 
 function getMemoryStoreByKey(key) {
     const { chatMetadata } = SillyTavern.getContext();
     const root = chatMetadata[MODULE_NAME];
 
-    if (getSettings().separateMemoryByCharacterCard && root?.memories) {
-        const store = root.memories[key];
-        return store ? normalizeChatStore(store) : null;
+    if (root?.memories?.[key]) {
+        return normalizeChatStore(root.memories[key]);
     }
 
     if (key === 'chat') {
-        return getChatStore();
+        if (root?.sharedMemory) return normalizeChatStore(root.sharedMemory);
+        if (looksLikeLegacyStore(root)) return normalizeChatStore(root);
+        return getSettings().separateMemoryByCharacterCard ? null : getChatStore();
     }
 
-    return root?.memories?.[key] ? normalizeChatStore(root.memories[key]) : null;
+    return null;
 }
 
 async function activateCharacterMemoryStore() {
@@ -550,34 +602,36 @@ async function unghostAllMessages(storeOverride = null) {
     );
 
     let processed = 0;
-    for (const idx of toUnhide) {
-        if (idx >= 0 && idx < chat.length) {
-            // Clear our ghost flag
-            if (chat[idx]?.extra?.sc_ghosted) {
-                delete chat[idx].extra.sc_ghosted;
+    try {
+        for (const idx of toUnhide) {
+            if (idx >= 0 && idx < chat.length) {
+                // Clear our ghost flag
+                if (chat[idx]?.extra?.sc_ghosted) {
+                    delete chat[idx].extra.sc_ghosted;
+                }
+
+                try {
+                    await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${idx}`, { showOutput: false });
+                } catch (e) {
+                    log(`Failed to unhide message ${idx}:`, e);
+                }
             }
 
-            try {
-                await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${idx}`, { showOutput: false });
-            } catch (e) {
-                log(`Failed to unhide message ${idx}:`, e);
+            processed++;
+            if (processed % 10 === 0 || processed === toUnhide.length) {
+                const pct = Math.round((processed / toUnhide.length) * 100);
+                $(progressToast).find('.toast-message').text(
+                    `Unhiding messages: ${processed} / ${toUnhide.length} (${pct}%)`
+                );
             }
         }
 
-        processed++;
-        if (processed % 10 === 0) {
-            const pct = Math.round((processed / toUnhide.length) * 100);
-            $(progressToast).find('.toast-message').text(
-                `Unhiding messages: ${processed} / ${toUnhide.length} (${pct}%)`
-            );
-        }
+        // Clear the tracking array
+        store.ghostedIndices = [];
+        log(`Unghosted ${toUnhide.length} messages (only Summaryception-hidden ones)`);
+    } finally {
+        clearPersistentToast(progressToast);
     }
-
-    // Clear the tracking array
-    store.ghostedIndices = [];
-
-    toastr.clear(progressToast);
-    log(`Unghosted ${toUnhide.length} messages (only Summaryception-hidden ones)`);
 }
 
 async function ghostMessagesUpTo(endIndex) {
@@ -595,44 +649,47 @@ async function ghostMessagesUpTo(endIndex) {
     );
 
     let processed = 0;
-    for (let i = 0; i <= endIndex; i++) {
-        const msg = chat[i];
-        if (!msg) continue;
-        if (msg.is_system && !msg.extra?.sc_ghosted) continue;
-        if (!msg.extra) msg.extra = {};
-        if (msg.extra.sc_ghosted) continue;
+    try {
+        for (let i = 0; i <= endIndex; i++) {
+            const msg = chat[i];
+            if (!msg) continue;
+            if (msg.is_system && !msg.extra?.sc_ghosted) continue;
+            if (!msg.extra) msg.extra = {};
+            if (msg.extra.sc_ghosted) continue;
 
-        // Check if the message is already hidden by the user (not by us)
-        // If so, skip it — don't claim ownership of a user-hidden message
-        if (msg.is_hidden) {
-            log(`Skipping message ${i} — already hidden by user`);
-            continue;
+            // Check if the message is already hidden by the user (not by us)
+            // If so, skip it — don't claim ownership of a user-hidden message
+            if (msg.is_hidden) {
+                log(`Skipping message ${i} — already hidden by user`);
+                continue;
+            }
+
+            msg.extra.sc_ghosted = true;
+
+            // Track that WE ghosted this message
+            if (!store.ghostedIndices.includes(i)) {
+                store.ghostedIndices.push(i);
+            }
+
+            try {
+                await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false });
+            } catch (e) {
+                log(`Failed to hide message ${i}:`, e);
+            }
+
+            processed++;
+            if (processed % 10 === 0 || i === endIndex) {
+                const pct = Math.round(((i + 1) / (endIndex + 1)) * 100);
+                $(progressToast).find('.toast-message').text(
+                    `Hiding messages: ${i + 1} / ${endIndex + 1} (${pct}%)`
+                );
+            }
         }
 
-        msg.extra.sc_ghosted = true;
-
-        // Track that WE ghosted this message
-        if (!store.ghostedIndices.includes(i)) {
-            store.ghostedIndices.push(i);
-        }
-
-        try {
-            await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false });
-        } catch (e) {
-            log(`Failed to hide message ${i}:`, e);
-        }
-
-        processed++;
-        if (processed % 10 === 0) {
-            const pct = Math.round((i / (endIndex + 1)) * 100);
-            $(progressToast).find('.toast-message').text(
-                `Hiding messages: ${i} / ${endIndex + 1} (${pct}%)`
-            );
-        }
+        log(`Ghosted messages from index 0 to ${endIndex}`);
+    } finally {
+        clearPersistentToast(progressToast);
     }
-
-    toastr.clear(progressToast);
-    log(`Ghosted messages from index 0 to ${endIndex}`);
 }
 
 // ─── Assistant Turn Utilities ────────────────────────────────────────
@@ -1351,8 +1408,6 @@ async function runCatchup(visibleTurns, overflow) {
             await new Promise(r => setTimeout(r, 200));
         }
 
-        toastr.clear(progressToast);
-
         if (cancelled) {
             toastr.warning(
                 `Catch-up paused at ${completed}/${totalBatches}. Progress saved — will continue on next message.`,
@@ -1376,6 +1431,7 @@ async function runCatchup(visibleTurns, overflow) {
         updateUI();
 
     } finally {
+        clearPersistentToast(progressToast);
         isSummarizing = false;
     }
 }
@@ -1804,6 +1860,8 @@ function getMemoryBankAttachment(key) {
 
 function getMemoryDatabaseSnapshot() {
     const s = getSettings();
+    const { chatMetadata } = SillyTavern.getContext();
+    const root = chatMetadata[MODULE_NAME];
     const activeKey = s.separateMemoryByCharacterCard ? getCharacterMemoryKey() : 'chat';
     const currentChat = getCurrentChatAttachmentInfo();
     const banks = getAllMemoryStores().map(([key, store]) => {
@@ -1820,7 +1878,7 @@ function getMemoryDatabaseSnapshot() {
         return {
             key,
             label: getMemoryBankLabel(key),
-            active: key === activeKey || (!s.separateMemoryByCharacterCard && key === 'chat'),
+            active: key === activeKey || (!s.separateMemoryByCharacterCard && key === 'chat') || key === root?.activeMemoryKey,
             chatId: attachment.chatId,
             chatName: attachment.chatName,
             characterId: attachment.characterId,
@@ -1841,7 +1899,7 @@ function getMemoryDatabaseSnapshot() {
         memoryMode: s.separateMemoryByCharacterCard ? 'perCharacterCard' : 'perChat',
         currentChat,
         activeKey,
-        activeLabel: s.separateMemoryByCharacterCard ? getCharacterMemoryLabel() : 'Shared chat memory',
+        activeLabel: getMemoryBankLabel(activeKey),
         bankCount: banks.length,
         banks,
     };
@@ -2410,7 +2468,7 @@ function bindUIEvents() {
             }
         }
 
-        toastr.clear(progressToast);
+        clearPersistentToast(progressToast);
 
         if (repaired > 0) {
             try {
