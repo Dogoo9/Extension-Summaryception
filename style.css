@@ -613,6 +613,26 @@
     line-height: 1.35;
 }
 
+.sc-db-snippet-actions,
+.sc-db-snippet-edit-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+}
+
+.sc-db-snippet-edit-area {
+    width: 100%;
+    min-height: 110px;
+    resize: vertical;
+    font-family: inherit;
+    line-height: 1.35;
+}
+
+.sc-db-snippet-editing {
+    outline: 1px solid var(--SmartThemeQuoteColor, #43b581);
+}
+
 .sc-db-json {
     width: calc(100% - 20px);
     min-height: 260px;
