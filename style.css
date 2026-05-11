@@ -517,6 +517,34 @@
     word-break: break-all;
 }
 
+.sc-db-attachments {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 6px;
+    padding: 0 10px 10px 10px;
+}
+
+.sc-db-attachment-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 7px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.045);
+}
+
+.sc-db-attachment-row span {
+    opacity: 0.65;
+    font-size: 0.78em;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.sc-db-attachment-row strong {
+    font-size: 0.9em;
+    word-break: break-word;
+}
+
 .sc-db-layer {
     margin: 0 10px 10px 10px;
     border-left: 2px solid var(--SmartThemeQuoteColor, #43b581);
