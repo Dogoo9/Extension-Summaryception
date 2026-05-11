@@ -389,6 +389,22 @@ function getAllMemoryStores() {
     return [['chat', getChatStore()]];
 }
 
+function getMemoryStoreByKey(key) {
+    const { chatMetadata } = SillyTavern.getContext();
+    const root = chatMetadata[MODULE_NAME];
+
+    if (getSettings().separateMemoryByCharacterCard && root?.memories) {
+        const store = root.memories[key];
+        return store ? normalizeChatStore(store) : null;
+    }
+
+    if (key === 'chat') {
+        return getChatStore();
+    }
+
+    return root?.memories?.[key] ? normalizeChatStore(root.memories[key]) : null;
+}
+
 async function activateCharacterMemoryStore() {
     const s = getSettings();
     if (!s.separateMemoryByCharacterCard) return;
@@ -1847,13 +1863,18 @@ function buildMemoryDatabaseHtml(snapshot) {
                             ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
                             : 'meta';
                     const timestamp = sn.timestamp ? new Date(sn.timestamp).toLocaleString() : 'unknown time';
-                    const flags = [sn.promoted ? 'promoted' : '', sn.regenerated ? 'regenerated' : '']
+                    const flags = [sn.promoted ? 'promoted' : '', sn.regenerated ? 'regenerated' : '', sn.edited ? 'edited' : '']
                         .filter(Boolean)
                         .join(', ');
                     return `
-                    <div class="sc-db-snippet">
+                    <div class="sc-db-snippet" data-bank-key="${escapeHtml(bank.key)}" data-layer="${layer.layerIndex}" data-idx="${sn.snippetIndex}">
                         <div class="sc-db-snippet-meta">#${sn.snippetIndex + 1} · ${rangeStr} · ${escapeHtml(timestamp)}${flags ? ` · ${escapeHtml(flags)}` : ''}</div>
                         <div class="sc-db-snippet-text">${escapeHtml(sn.text || '')}</div>
+                        <div class="sc-db-snippet-actions">
+                            <button class="menu_button sc-db-snippet-edit-btn" type="button" title="Edit this memory snippet">
+                                <i class="fa-solid fa-pen-to-square"></i> Edit Memory
+                            </button>
+                        </div>
                     </div>`;
                 }).join('');
 
@@ -1904,10 +1925,11 @@ function downloadJson(filename, data) {
 function showMemoryDatabaseModal() {
     document.querySelector('.sc-db-overlay')?.remove();
 
-    const snapshot = getMemoryDatabaseSnapshot();
+    let snapshot = getMemoryDatabaseSnapshot();
     const overlay = document.createElement('div');
     overlay.className = 'sc-db-overlay';
-    overlay.innerHTML = `
+
+    const buildModalShell = () => `
     <div class="sc-db-modal" role="dialog" aria-modal="true" aria-labelledby="sc_db_title">
         <div class="sc-db-header">
             <div>
@@ -1929,9 +1951,32 @@ function showMemoryDatabaseModal() {
             </details>
         </div>
         <div class="sc-db-footer sc-muted">
-            This viewer uses the memory already stored in chat metadata. No external vector database is required for Summaryception's ordered summaries.
+            Edit Memory changes the selected stored snippet in-place, then refreshes the injected Summaryception context. No external vector database is required for Summaryception's ordered summaries.
         </div>
     </div>`;
+
+    overlay.innerHTML = buildModalShell();
+
+    const applyFilter = () => {
+        const filterInput = overlay.querySelector('#sc_db_filter');
+        const needle = filterInput?.value.trim().toLowerCase() || '';
+        for (const bankEl of overlay.querySelectorAll('.sc-db-bank')) {
+            const matches = !needle || bankEl.textContent.toLowerCase().includes(needle);
+            bankEl.style.display = matches ? '' : 'none';
+            if (matches && needle) bankEl.open = true;
+        }
+    };
+
+    const refreshDatabaseView = () => {
+        const filterInput = overlay.querySelector('#sc_db_filter');
+        const filterValue = filterInput?.value || '';
+        snapshot = getMemoryDatabaseSnapshot();
+        overlay.querySelector('.sc-db-subtitle').innerHTML = `${escapeHtml(snapshot.currentChat.chatName)} · ${escapeHtml(snapshot.memoryMode)} · ${snapshot.bankCount} bank${snapshot.bankCount === 1 ? '' : 's'} · active: ${escapeHtml(snapshot.activeLabel)}`;
+        overlay.querySelector('#sc_db_rendered').innerHTML = buildMemoryDatabaseHtml(snapshot);
+        overlay.querySelector('#sc_db_json').value = JSON.stringify(snapshot, null, 2);
+        if (filterInput) filterInput.value = filterValue;
+        applyFilter();
+    };
 
     const close = () => {
         document.removeEventListener('keydown', keyHandler);
@@ -1947,17 +1992,73 @@ function showMemoryDatabaseModal() {
 
     document.addEventListener('keydown', keyHandler);
 
-    overlay.querySelector('#sc_db_filter').addEventListener('input', (event) => {
-        const needle = event.target.value.trim().toLowerCase();
-        for (const bankEl of overlay.querySelectorAll('.sc-db-bank')) {
-            const matches = !needle || bankEl.textContent.toLowerCase().includes(needle);
-            bankEl.style.display = matches ? '' : 'none';
-            if (matches && needle) bankEl.open = true;
+    overlay.querySelector('#sc_db_filter').addEventListener('input', applyFilter);
+
+    overlay.querySelector('#sc_db_rendered').addEventListener('click', async (event) => {
+        const cancelButton = event.target.closest('.sc-db-snippet-cancel-btn');
+        if (cancelButton) {
+            refreshDatabaseView();
+            return;
         }
+
+        const saveButton = event.target.closest('.sc-db-snippet-save-btn');
+        if (saveButton) {
+            const snippetEl = saveButton.closest('.sc-db-snippet');
+            const bankKey = snippetEl?.dataset.bankKey;
+            const layerIndex = Number.parseInt(snippetEl?.dataset.layer, 10);
+            const snippetIndex = Number.parseInt(snippetEl?.dataset.idx, 10);
+            const textarea = snippetEl?.querySelector('.sc-db-snippet-edit-area');
+            const newText = textarea?.value.trim();
+
+            if (!bankKey || Number.isNaN(layerIndex) || Number.isNaN(snippetIndex) || !textarea) return;
+            if (!newText) {
+                toastr.warning('Memory text cannot be empty.', 'Summaryception', { timeOut: 2000 });
+                textarea.focus();
+                return;
+            }
+
+            const store = getMemoryStoreByKey(bankKey);
+            const snippet = store?.layers?.[layerIndex]?.[snippetIndex];
+            if (!snippet) {
+                toastr.error('Could not find that memory snippet. Refreshing database view.', 'Summaryception');
+                refreshDatabaseView();
+                return;
+            }
+
+            snippet.text = newText;
+            snippet.edited = true;
+            snippet.editedAt = new Date().toISOString();
+            await saveChatStore();
+            updateInjection();
+            updateUI();
+            refreshDatabaseView();
+            toastr.success(`Memory updated in Layer ${layerIndex}.`, 'Summaryception', { timeOut: 2000 });
+            return;
+        }
+
+        const editButton = event.target.closest('.sc-db-snippet-edit-btn');
+        if (!editButton) return;
+
+        const snippetEl = editButton.closest('.sc-db-snippet');
+        const textEl = snippetEl?.querySelector('.sc-db-snippet-text');
+        if (!snippetEl || !textEl || snippetEl.classList.contains('sc-db-snippet-editing')) return;
+
+        const originalText = textEl.textContent || '';
+        snippetEl.classList.add('sc-db-snippet-editing');
+        textEl.innerHTML = `
+            <textarea class="text_pole sc-db-snippet-edit-area" rows="5">${escapeHtml(originalText)}</textarea>
+            <div class="sc-db-snippet-edit-actions">
+                <button class="menu_button sc-db-snippet-save-btn" type="button"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+                <button class="menu_button sc-db-snippet-cancel-btn" type="button"><i class="fa-solid fa-ban"></i> Cancel</button>
+            </div>`;
+        editButton.style.display = 'none';
+        textEl.querySelector('.sc-db-snippet-edit-area')?.focus();
     });
 
     overlay.querySelector('#sc_db_copy').addEventListener('click', async () => {
+        snapshot = getMemoryDatabaseSnapshot();
         const json = JSON.stringify(snapshot, null, 2);
+        overlay.querySelector('#sc_db_json').value = json;
         if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(json);
         } else {
@@ -1970,6 +2071,8 @@ function showMemoryDatabaseModal() {
     });
 
     overlay.querySelector('#sc_db_export_all').addEventListener('click', () => {
+        snapshot = getMemoryDatabaseSnapshot();
+        overlay.querySelector('#sc_db_json').value = JSON.stringify(snapshot, null, 2);
         downloadJson(`summaryception_memory_database_${Date.now()}.json`, snapshot);
         toastr.success('Memory database exported.', 'Summaryception', { timeOut: 2000 });
     });
