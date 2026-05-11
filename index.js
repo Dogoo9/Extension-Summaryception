@@ -274,6 +274,38 @@ function getCharacterMemoryLabel() {
         || 'Unknown character';
 }
 
+function getCurrentChatAttachmentInfo() {
+    const ctx = SillyTavern.getContext();
+    const characterId = ctx.characterId ?? ctx.this_chid ?? ctx.chid ?? null;
+    const character = characterId !== null ? ctx.characters?.[characterId] : null;
+    const groupId = ctx.groupId ?? ctx.selected_group ?? null;
+    const group = groupId !== null && Array.isArray(ctx.groups) ? ctx.groups.find(g => g?.id === groupId) : null;
+    const chatId = ctx.chatId
+        || ctx.chat?.chatId
+        || ctx.chat?.id
+        || ctx.chatMetadata?.chat_id
+        || ctx.chatMetadata?.file_name
+        || ctx.chatMetadata?.filename
+        || null;
+    const chatName = ctx.chatName
+        || ctx.chat?.name
+        || ctx.chatMetadata?.chat_name
+        || ctx.chatMetadata?.name
+        || ctx.chatMetadata?.title
+        || chatId
+        || 'Current chat';
+
+    return {
+        chatId,
+        chatName,
+        characterId,
+        characterName: ctx.character?.name || character?.name || ctx.name2 || 'Unknown character',
+        characterAvatar: ctx.character?.avatar || character?.avatar || null,
+        groupId,
+        groupName: group?.name || null,
+    };
+}
+
 function looksLikeLegacyStore(root) {
     return root && (
         Array.isArray(root.layers)
@@ -325,6 +357,12 @@ function getMemoryRoot() {
     if (!memoryRoot.memories || typeof memoryRoot.memories !== 'object') {
         memoryRoot.memories = {};
     }
+    if (!memoryRoot.memoryLabels || typeof memoryRoot.memoryLabels !== 'object') {
+        memoryRoot.memoryLabels = {};
+    }
+    if (!memoryRoot.memoryAttachments || typeof memoryRoot.memoryAttachments !== 'object') {
+        memoryRoot.memoryAttachments = {};
+    }
     if (!memoryRoot.memories[activeKey]) {
         memoryRoot.memories[activeKey] = createEmptyChatStore();
     }
@@ -332,6 +370,8 @@ function getMemoryRoot() {
     memoryRoot.version = 2;
     memoryRoot.memoryMode = 'perCharacterCard';
     memoryRoot.activeMemoryKey = activeKey;
+    memoryRoot.memoryLabels[activeKey] = getCharacterMemoryLabel();
+    memoryRoot.memoryAttachments[activeKey] = getCurrentChatAttachmentInfo();
 
     return normalizeChatStore(memoryRoot.memories[activeKey]);
 }
@@ -1721,14 +1761,35 @@ function getMemoryBankLabel(key) {
     const { chatMetadata } = SillyTavern.getContext();
     const root = chatMetadata[MODULE_NAME];
     if (root?.memoryLabels?.[key]) return root.memoryLabels[key];
+    if (root?.memoryAttachments?.[key]?.characterName) return root.memoryAttachments[key].characterName;
     if (key === getCharacterMemoryKey()) return getCharacterMemoryLabel();
     if (key === 'chat') return 'Shared chat memory';
     return key.replace(/^character:/, 'Character ');
 }
 
+function getMemoryBankAttachment(key) {
+    const { chatMetadata } = SillyTavern.getContext();
+    const root = chatMetadata[MODULE_NAME];
+    const currentAttachment = getCurrentChatAttachmentInfo();
+
+    if (key === 'chat') {
+        return {
+            ...currentAttachment,
+            characterName: 'All characters in this chat',
+        };
+    }
+
+    return {
+        ...currentAttachment,
+        ...(root?.memoryAttachments?.[key] || {}),
+        characterName: getMemoryBankLabel(key),
+    };
+}
+
 function getMemoryDatabaseSnapshot() {
     const s = getSettings();
     const activeKey = s.separateMemoryByCharacterCard ? getCharacterMemoryKey() : 'chat';
+    const currentChat = getCurrentChatAttachmentInfo();
     const banks = getAllMemoryStores().map(([key, store]) => {
         const layers = (store.layers || []).map((layer, layerIndex) => ({
             layerIndex,
@@ -1738,10 +1799,19 @@ function getMemoryDatabaseSnapshot() {
             })),
         }));
 
+        const attachment = getMemoryBankAttachment(key);
+
         return {
             key,
             label: getMemoryBankLabel(key),
             active: key === activeKey || (!s.separateMemoryByCharacterCard && key === 'chat'),
+            chatId: attachment.chatId,
+            chatName: attachment.chatName,
+            characterId: attachment.characterId,
+            characterName: attachment.characterName,
+            characterAvatar: attachment.characterAvatar,
+            groupId: attachment.groupId,
+            groupName: attachment.groupName,
             summarizedUpTo: store.summarizedUpTo ?? -1,
             ghostedIndices: [...(store.ghostedIndices || [])],
             snippetCount: layers.reduce((sum, layer) => sum + layer.snippets.length, 0),
@@ -1753,6 +1823,7 @@ function getMemoryDatabaseSnapshot() {
         generatedAt: new Date().toISOString(),
         module: MODULE_NAME,
         memoryMode: s.separateMemoryByCharacterCard ? 'perCharacterCard' : 'perChat',
+        currentChat,
         activeKey,
         activeLabel: s.separateMemoryByCharacterCard ? getCharacterMemoryLabel() : 'Shared chat memory',
         bankCount: banks.length,
@@ -1793,13 +1864,28 @@ function buildMemoryDatabaseHtml(snapshot) {
                 </details>`;
             }).join('') || '<div class="sc-muted">No snippets in this bank yet.</div>';
 
+        const attachmentRows = [
+            ['Character', bank.characterName || 'Unknown character'],
+            ['Chat', bank.chatName || 'Current chat'],
+            bank.chatId !== null && bank.chatId !== undefined ? ['Chat ID/file', bank.chatId] : null,
+            bank.characterId !== null && bank.characterId !== undefined ? ['Character ID', bank.characterId] : null,
+            bank.groupName ? ['Group', bank.groupName] : null,
+            bank.groupId !== null && bank.groupId !== undefined ? ['Group ID', bank.groupId] : null,
+            bank.characterAvatar ? ['Avatar', bank.characterAvatar] : null,
+        ].filter(Boolean).map(([label, value]) => `
+            <div class="sc-db-attachment-row">
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(String(value))}</strong>
+            </div>`).join('');
+
         return `
         <details class="sc-db-bank" ${bank.active ? 'open' : ''} data-bank-key="${escapeHtml(bank.key)}">
             <summary>
                 <span>${bank.active ? '🟢 ' : ''}${escapeHtml(bank.label)}</span>
                 <span class="sc-db-bank-meta">${bank.snippetCount} snippets · ${bank.ghostedIndices.length} ghosted · up to ${bank.summarizedUpTo}</span>
             </summary>
-            <div class="sc-db-bank-key">${escapeHtml(bank.key)}</div>
+            <div class="sc-db-bank-key">Memory key: ${escapeHtml(bank.key)}</div>
+            <div class="sc-db-attachments">${attachmentRows}</div>
             ${layerHtml}
         </details>`;
     }).join('');
@@ -1816,6 +1902,8 @@ function downloadJson(filename, data) {
 }
 
 function showMemoryDatabaseModal() {
+    document.querySelector('.sc-db-overlay')?.remove();
+
     const snapshot = getMemoryDatabaseSnapshot();
     const overlay = document.createElement('div');
     overlay.className = 'sc-db-overlay';
@@ -1824,7 +1912,7 @@ function showMemoryDatabaseModal() {
         <div class="sc-db-header">
             <div>
                 <h3 id="sc_db_title">🧠 Summaryception Memory Database</h3>
-                <div class="sc-db-subtitle">${escapeHtml(snapshot.memoryMode)} · ${snapshot.bankCount} bank${snapshot.bankCount === 1 ? '' : 's'} · active: ${escapeHtml(snapshot.activeLabel)}</div>
+                <div class="sc-db-subtitle">${escapeHtml(snapshot.currentChat.chatName)} · ${escapeHtml(snapshot.memoryMode)} · ${snapshot.bankCount} bank${snapshot.bankCount === 1 ? '' : 's'} · active: ${escapeHtml(snapshot.activeLabel)}</div>
             </div>
             <button class="menu_button sc-db-close" title="Close"><i class="fa-solid fa-xmark"></i></button>
         </div>
@@ -2239,6 +2327,10 @@ function bindUIEvents() {
         }
     });
 
+
+    $('#sc_view_database').on('click', function () {
+        showMemoryDatabaseModal();
+    });
 
     $('#sc_clear_memory').on('click', async function () {
         if (!confirm('Clear Summaryception memory for the active memory bank and unghost its messages?')) return;
