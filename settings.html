@@ -23,13 +23,6 @@
                 </label>
             </div>
 
-            <!-- ═══ Stop hiding verbatim turns ═══ -->
-            <label class="checkbox_label" for="sc_disable_ghosting">
-                <input type="checkbox" id="sc_disable_ghosting" />
-                <span>Disable Message Hiding</span>
-                <small class="sc-hint">Messages will still be summarized and excluded from LLM context, but won't be visually hidden. Useful for compatibility with other extensions (QVink, MemoryBooks, etc.).</small>
-            </label>
-
             <!-- ═══ Character Memory Scope ═══ -->
             <div class="sc-row">
                 <label class="checkbox_label" for="sc_separate_by_character">
@@ -418,9 +411,52 @@
                     <div class="sc-row">
                         <label for="sc_injection_template">
                             <span>Injection Wrapper Template</span>
-                            <small class="sc-hint">Wraps the assembled block. Use <code>{{summary}}</code> for the combined text.</small>
+                            <small class="sc-hint">Wraps the assembled block. Use <code>{{summary}}</code> for the combined text. If the placeholder is missing, Summaryception appends the summary instead of silently injecting an empty wrapper.</small>
                         </label>
                         <textarea id="sc_injection_template" class="text_pole sc-textarea" rows="3"></textarea>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_injection_position">
+                            <span>Injection Position</span>
+                            <small class="sc-hint">Prompt is the most reliable option and matches SillyTavern's native summary memory. In Chat lets you place the summary at a message depth.</small>
+                        </label>
+                        <select id="sc_injection_position" class="text_pole">
+                            <option value="in_prompt">Prompt (reliable default)</option>
+                            <option value="in_chat">In Chat at depth</option>
+                            <option value="before_prompt">Before Prompt</option>
+                        </select>
+                    </div>
+
+                    <div class="sc-slider-row">
+                        <label for="sc_injection_depth">In-Chat Injection Depth</label>
+                        <input type="range" id="sc_injection_depth" min="0" max="100" step="1" />
+                        <span id="sc_injection_depth_val" class="sc-val">2</span>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_injection_role">
+                            <span>Injection Role</span>
+                            <small class="sc-hint">System is recommended for summaries. Use User or Assistant only if your preset expects it.</small>
+                        </label>
+                        <select id="sc_injection_role" class="text_pole">
+                            <option value="system">System</option>
+                            <option value="user">User</option>
+                            <option value="assistant">Assistant</option>
+                        </select>
+                    </div>
+
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_injection_scan">
+                            <input type="checkbox" id="sc_injection_scan" />
+                            <span>Include injected summary in World Info scans</span>
+                        </label>
+                    </div>
+
+                    <div class="sc-button-row">
+                        <button id="sc_test_injection" class="menu_button">
+                            <i class="fa-solid fa-vial-circle-check"></i> Test Injection Registration
+                        </button>
                     </div>
 
                     <hr class="sc-divider" />

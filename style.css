@@ -646,3 +646,14 @@
     border-top: 1px solid var(--SmartThemeBorderColor, #444);
     border-bottom: none;
 }
+
+.sc-db-bank-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 0 10px 10px 10px;
+}
+
+.sc-db-snippet-delete-btn {
+    color: #ff6b6b;
+}

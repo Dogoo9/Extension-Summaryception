@@ -31,6 +31,10 @@ const defaultSettings = Object.freeze({
     snippetsPerPromotion: 3,
     maxLayers: 5,
     injectionTemplate: '[Summary of past events: {{summary}}]',
+    injectionPosition: 'in_prompt',        // 'in_prompt' | 'in_chat' | 'before_prompt'
+    injectionDepth: 2,                    // Used only for in-chat injection. 0 = immediately before latest message.
+    injectionRole: 'system',              // 'system' | 'user' | 'assistant'
+    injectionScan: false,                 // Include summary block in World Info scans
 
     summarizerSystemPrompt:
         'You are a precise narrative-state tracker. You output only the summary line — no preamble, no commentary, no markdown.',
@@ -113,6 +117,25 @@ const PROMPT_PRESETS = {
 };
 
 const DEFAULT_PROMPT_PRESET = 'narrative';
+
+const EXTENSION_PROMPT_TYPES = Object.freeze({
+    IN_PROMPT: 0,
+    IN_CHAT: 1,
+    BEFORE_PROMPT: 2,
+});
+
+const EXTENSION_PROMPT_ROLES = Object.freeze({
+    system: 0,
+    user: 1,
+    assistant: 2,
+});
+
+const INJECTION_POSITION_LABELS = Object.freeze({
+    in_prompt: 'Prompt',
+    in_chat: 'In Chat',
+    before_prompt: 'Before Prompt',
+});
+
 
 // ─── Retry Configuration ─────────────────────────────────────────────
 
@@ -455,6 +478,37 @@ function getMemoryStoreByKey(key) {
     }
 
     return null;
+}
+
+function getMemorySnippetByPath(bankKey, layerIndex, snippetIndex) {
+    const store = getMemoryStoreByKey(bankKey);
+    const layer = store?.layers?.[layerIndex];
+    const snippet = Array.isArray(layer) ? layer[snippetIndex] : null;
+    return { store, layer, snippet };
+}
+
+function recalculateSummarizedUpTo(store) {
+    let maxEnd = -1;
+    for (const layer of store?.layers || []) {
+        if (!Array.isArray(layer)) continue;
+        for (const snippet of layer) {
+            const end = snippet?.turnRange?.[1];
+            if (Number.isFinite(end)) maxEnd = Math.max(maxEnd, end);
+        }
+    }
+    store.summarizedUpTo = maxEnd;
+}
+
+async function persistMemoryDatabaseChange() {
+    await saveChatStore();
+    try {
+        const ctx = SillyTavern.getContext();
+        if (ctx.saveChat) await ctx.saveChat();
+    } catch (e) {
+        log('Could not save chat after memory database change:', e);
+    }
+    updateInjection();
+    updateUI();
 }
 
 async function activateCharacterMemoryStore() {
@@ -1596,33 +1650,102 @@ function assembleSummaryBlock() {
 
     if (snippets.length === 0) return '';
 
-    return s.injectionTemplate.replace('{{summary}}', snippets.join(' '));
+    const combinedSummary = snippets.join(' ').trim();
+    const template = (s.injectionTemplate || defaultSettings.injectionTemplate).trim();
+
+    if (template.includes('{{summary}}')) {
+        return template.replaceAll('{{summary}}', combinedSummary);
+    }
+
+    // A missing placeholder used to silently drop the summary from injection.
+    // Append the summary instead so a bad edit is visible and recoverable.
+    return `${template}
+${combinedSummary}`.trim();
+}
+
+function getInjectionPositionValue(position) {
+    switch (position) {
+        case 'in_chat':
+            return EXTENSION_PROMPT_TYPES.IN_CHAT;
+        case 'before_prompt':
+            return EXTENSION_PROMPT_TYPES.BEFORE_PROMPT;
+        case 'in_prompt':
+        default:
+            return EXTENSION_PROMPT_TYPES.IN_PROMPT;
+    }
+}
+
+function getInjectionRoleValue(role) {
+    return EXTENSION_PROMPT_ROLES[role] ?? EXTENSION_PROMPT_ROLES.system;
+}
+
+function getInjectionDepthValue(settings) {
+    const parsed = Number(settings.injectionDepth);
+    if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
+    return defaultSettings.injectionDepth;
+}
+
+function getInjectionDebugSummary(value, position, depth, scan, role) {
+    return {
+        chars: value?.length || 0,
+        position,
+        positionLabel: INJECTION_POSITION_LABELS[getSettings().injectionPosition] || 'Prompt',
+        depth,
+        scan,
+        role,
+        roleLabel: getSettings().injectionRole || 'system',
+    };
+}
+
+function setSummaryceptionExtensionPrompt(value) {
+    const ctx = SillyTavern.getContext();
+    const s = getSettings();
+
+    if (typeof ctx.setExtensionPrompt !== 'function') {
+        throw new Error('SillyTavern setExtensionPrompt API is not available. Update SillyTavern or reload the page.');
+    }
+
+    const position = getInjectionPositionValue(s.injectionPosition);
+    const depth = getInjectionDepthValue(s);
+    const scan = Boolean(s.injectionScan);
+    const role = getInjectionRoleValue(s.injectionRole);
+
+    ctx.setExtensionPrompt(MODULE_NAME, value || '', position, depth, scan, role);
+
+    const registered = ctx.extensionPrompts?.[MODULE_NAME];
+    if (registered && registered.value !== String(value || '')) {
+        console.warn(LOG_PREFIX, 'Extension prompt registry did not retain the expected value.', registered);
+    }
+
+    return getInjectionDebugSummary(value || '', position, depth, scan, role);
 }
 
 // ─── Injection via setExtensionPrompt ────────────────────────────────
 
 function updateInjection() {
     try {
-        const { setExtensionPrompt } = SillyTavern.getContext();
         const s = getSettings();
 
         if (!s.enabled) {
-            setExtensionPrompt(MODULE_NAME, '', 1, 0, false, 0);
-            return;
+            const info = setSummaryceptionExtensionPrompt('');
+            log('Injection cleared because Summaryception is disabled:', info);
+            return false;
         }
 
         const summaryBlock = assembleSummaryBlock();
         if (!summaryBlock) {
-            setExtensionPrompt(MODULE_NAME, '', 1, 0, false, 0);
-            return;
+            const info = setSummaryceptionExtensionPrompt('');
+            log('Injection cleared because there is no summary block:', info);
+            return false;
         }
 
-        const depth = s.verbatimTurns * 2;
-        setExtensionPrompt(MODULE_NAME, summaryBlock, 1, depth, false, 0);
-
-        log(`Injection updated: ${summaryBlock.length} chars at depth ${depth}`);
+        const info = setSummaryceptionExtensionPrompt(summaryBlock);
+        log('Injection updated:', info);
+        return true;
     } catch (e) {
-        log('updateInjection error:', e);
+        console.error(LOG_PREFIX, 'updateInjection error:', e);
+        toastr.error(`Summary injection failed: ${e.message || e}`, 'Summaryception', { timeOut: 8000 });
+        return false;
     }
 }
 
@@ -1682,6 +1805,9 @@ function registerSlashCommands() {
                     lines.push(`Active card: ${getCharacterMemoryLabel()} (${getCharacterMemoryKey()})`);
                     lines.push(`Memory banks in this chat: ${getAllMemoryStores().length}`);
                 }
+                const s = getSettings();
+                lines.push(`Injection: ${INJECTION_POSITION_LABELS[s.injectionPosition] || 'Prompt'}${s.injectionPosition === 'in_chat' ? ` at depth ${getInjectionDepthValue(s)}` : ''} as ${s.injectionRole || 'system'}`);
+                lines.push(`Injected chars: ${(SillyTavern.getContext().extensionPrompts?.[MODULE_NAME]?.value || '').length}`);
                 lines.push(`Summarized up to index: ${store.summarizedUpTo}`);
                 if (store.layers) {
                     for (let i = 0; i < store.layers.length; i++) {
@@ -1763,6 +1889,11 @@ function updateUI() {
         $('#sc_max_layers').val(s.maxLayers);
         $('#sc_max_layers_val').text(s.maxLayers);
         $('#sc_injection_template').val(s.injectionTemplate);
+        $('#sc_injection_position').val(s.injectionPosition || defaultSettings.injectionPosition);
+        $('#sc_injection_depth').val(getInjectionDepthValue(s));
+        $('#sc_injection_depth_val').text(getInjectionDepthValue(s));
+        $('#sc_injection_role').val(s.injectionRole || defaultSettings.injectionRole);
+        $('#sc_injection_scan').prop('checked', Boolean(s.injectionScan));
         $('#sc_summarizer_system_prompt').val(s.summarizerSystemPrompt);
         $('#sc_summarizer_user_prompt').val(s.summarizerUserPrompt);
         // ── Prompt preset migration & sync ──
@@ -1801,6 +1932,11 @@ function updateUI() {
             statsHtml += `<div class="sc-layer-stat">🃏 Active card memory: <strong>${escapeHtml(getCharacterMemoryLabel())}</strong></div>`;
             statsHtml += `<div class="sc-layer-stat sc-muted">Memory banks in this chat: ${getAllMemoryStores().length}</div>`;
         }
+        const injectionPositionLabel = INJECTION_POSITION_LABELS[s.injectionPosition] || INJECTION_POSITION_LABELS.in_prompt;
+        const injectionSuffix = s.injectionPosition === 'in_chat'
+            ? ` at depth ${getInjectionDepthValue(s)}`
+            : '';
+        statsHtml += `<div class="sc-layer-stat">📌 Injection: <strong>${escapeHtml(injectionPositionLabel)}</strong>${escapeHtml(injectionSuffix)} as ${escapeHtml(s.injectionRole || 'system')}</div>`;
         statsHtml += `<div class="sc-layer-stat">👻 <strong>${ghostedCount}</strong> messages ghosted (hidden from LLM, visible to you)</div>`;
         if (store.layers) {
             for (let i = store.layers.length - 1; i >= 0; i--) {
@@ -1859,6 +1995,9 @@ function getMemoryBankAttachment(key) {
 }
 
 function getMemoryDatabaseSnapshot() {
+    // Ensure metadata exists and the active bank label/attachment are current before snapshotting.
+    getChatStore();
+
     const s = getSettings();
     const { chatMetadata } = SillyTavern.getContext();
     const root = chatMetadata[MODULE_NAME];
@@ -1878,7 +2017,7 @@ function getMemoryDatabaseSnapshot() {
         return {
             key,
             label: getMemoryBankLabel(key),
-            active: key === activeKey || (!s.separateMemoryByCharacterCard && key === 'chat') || key === root?.activeMemoryKey,
+            active: s.separateMemoryByCharacterCard ? key === activeKey : key === 'chat',
             chatId: attachment.chatId,
             chatName: attachment.chatName,
             characterId: attachment.characterId,
@@ -1926,11 +2065,14 @@ function buildMemoryDatabaseHtml(snapshot) {
                         .join(', ');
                     return `
                     <div class="sc-db-snippet" data-bank-key="${escapeHtml(bank.key)}" data-layer="${layer.layerIndex}" data-idx="${sn.snippetIndex}">
-                        <div class="sc-db-snippet-meta">#${sn.snippetIndex + 1} · ${rangeStr} · ${escapeHtml(timestamp)}${flags ? ` · ${escapeHtml(flags)}` : ''}</div>
+                        <div class="sc-db-snippet-meta">#${sn.snippetIndex + 1} · ${escapeHtml(rangeStr)} · ${escapeHtml(timestamp)}${flags ? ` · ${escapeHtml(flags)}` : ''}</div>
                         <div class="sc-db-snippet-text">${escapeHtml(sn.text || '')}</div>
                         <div class="sc-db-snippet-actions">
                             <button class="menu_button sc-db-snippet-edit-btn" type="button" title="Edit this memory snippet">
                                 <i class="fa-solid fa-pen-to-square"></i> Edit Memory
+                            </button>
+                            <button class="menu_button menu_button_danger sc-db-snippet-delete-btn" type="button" title="Delete this memory snippet">
+                                <i class="fa-solid fa-trash"></i> Delete
                             </button>
                         </div>
                     </div>`;
@@ -1964,6 +2106,11 @@ function buildMemoryDatabaseHtml(snapshot) {
                 <span class="sc-db-bank-meta">${bank.snippetCount} snippets · ${bank.ghostedIndices.length} ghosted · up to ${bank.summarizedUpTo}</span>
             </summary>
             <div class="sc-db-bank-key">Memory key: ${escapeHtml(bank.key)}</div>
+            <div class="sc-db-bank-actions">
+                <button class="menu_button sc-db-bank-export-btn" type="button" data-bank-key="${escapeHtml(bank.key)}">
+                    <i class="fa-solid fa-file-export"></i> Export Bank
+                </button>
+            </div>
             <div class="sc-db-attachments">${attachmentRows}</div>
             ${layerHtml}
         </details>`;
@@ -1998,6 +2145,7 @@ function showMemoryDatabaseModal() {
         </div>
         <div class="sc-db-toolbar">
             <input id="sc_db_filter" class="text_pole" type="search" placeholder="Filter banks and snippets..." />
+            <button id="sc_db_refresh" class="menu_button"><i class="fa-solid fa-rotate"></i> Refresh</button>
             <button id="sc_db_copy" class="menu_button"><i class="fa-solid fa-copy"></i> Copy JSON</button>
             <button id="sc_db_export_all" class="menu_button"><i class="fa-solid fa-file-export"></i> Export All</button>
         </div>
@@ -2028,9 +2176,13 @@ function showMemoryDatabaseModal() {
     const refreshDatabaseView = () => {
         const filterInput = overlay.querySelector('#sc_db_filter');
         const filterValue = filterInput?.value || '';
+        const openBanks = new Set([...overlay.querySelectorAll('.sc-db-bank[open]')].map(el => el.dataset.bankKey));
         snapshot = getMemoryDatabaseSnapshot();
         overlay.querySelector('.sc-db-subtitle').innerHTML = `${escapeHtml(snapshot.currentChat.chatName)} · ${escapeHtml(snapshot.memoryMode)} · ${snapshot.bankCount} bank${snapshot.bankCount === 1 ? '' : 's'} · active: ${escapeHtml(snapshot.activeLabel)}`;
         overlay.querySelector('#sc_db_rendered').innerHTML = buildMemoryDatabaseHtml(snapshot);
+        for (const bankEl of overlay.querySelectorAll('.sc-db-bank')) {
+            if (openBanks.has(bankEl.dataset.bankKey)) bankEl.open = true;
+        }
         overlay.querySelector('#sc_db_json').value = JSON.stringify(snapshot, null, 2);
         if (filterInput) filterInput.value = filterValue;
         applyFilter();
@@ -2075,8 +2227,7 @@ function showMemoryDatabaseModal() {
                 return;
             }
 
-            const store = getMemoryStoreByKey(bankKey);
-            const snippet = store?.layers?.[layerIndex]?.[snippetIndex];
+            const { snippet } = getMemorySnippetByPath(bankKey, layerIndex, snippetIndex);
             if (!snippet) {
                 toastr.error('Could not find that memory snippet. Refreshing database view.', 'Summaryception');
                 refreshDatabaseView();
@@ -2086,11 +2237,49 @@ function showMemoryDatabaseModal() {
             snippet.text = newText;
             snippet.edited = true;
             snippet.editedAt = new Date().toISOString();
-            await saveChatStore();
-            updateInjection();
-            updateUI();
+            await persistMemoryDatabaseChange();
             refreshDatabaseView();
             toastr.success(`Memory updated in Layer ${layerIndex}.`, 'Summaryception', { timeOut: 2000 });
+            return;
+        }
+
+        const deleteButton = event.target.closest('.sc-db-snippet-delete-btn');
+        if (deleteButton) {
+            const snippetEl = deleteButton.closest('.sc-db-snippet');
+            const bankKey = snippetEl?.dataset.bankKey;
+            const layerIndex = Number.parseInt(snippetEl?.dataset.layer, 10);
+            const snippetIndex = Number.parseInt(snippetEl?.dataset.idx, 10);
+
+            if (!bankKey || Number.isNaN(layerIndex) || Number.isNaN(snippetIndex)) return;
+            if (!confirm(`Delete memory snippet #${snippetIndex + 1} from Layer ${layerIndex}? This cannot be undone.`)) return;
+
+            const { store, layer, snippet } = getMemorySnippetByPath(bankKey, layerIndex, snippetIndex);
+            if (!store || !Array.isArray(layer) || !snippet) {
+                toastr.error('Could not find that memory snippet. Refreshing database view.', 'Summaryception');
+                refreshDatabaseView();
+                return;
+            }
+
+            layer.splice(snippetIndex, 1);
+            recalculateSummarizedUpTo(store);
+            await persistMemoryDatabaseChange();
+            refreshDatabaseView();
+            toastr.success(`Memory deleted from Layer ${layerIndex}.`, 'Summaryception', { timeOut: 2000 });
+            return;
+        }
+
+        const bankExportButton = event.target.closest('.sc-db-bank-export-btn');
+        if (bankExportButton) {
+            const bankKey = bankExportButton.dataset.bankKey;
+            snapshot = getMemoryDatabaseSnapshot();
+            const bank = snapshot.banks.find(item => item.key === bankKey);
+            if (!bank) {
+                toastr.error('Could not find that memory bank. Refreshing database view.', 'Summaryception');
+                refreshDatabaseView();
+                return;
+            }
+            downloadJson(`summaryception_memory_bank_${bankKey.replace(/[^a-z0-9_-]+/gi, '_')}_${Date.now()}.json`, bank);
+            toastr.success('Memory bank exported.', 'Summaryception', { timeOut: 2000 });
             return;
         }
 
@@ -2113,19 +2302,29 @@ function showMemoryDatabaseModal() {
         textEl.querySelector('.sc-db-snippet-edit-area')?.focus();
     });
 
+    overlay.querySelector('#sc_db_refresh').addEventListener('click', () => {
+        refreshDatabaseView();
+        toastr.info('Memory database refreshed.', 'Summaryception', { timeOut: 1500 });
+    });
+
     overlay.querySelector('#sc_db_copy').addEventListener('click', async () => {
-        snapshot = getMemoryDatabaseSnapshot();
-        const json = JSON.stringify(snapshot, null, 2);
-        overlay.querySelector('#sc_db_json').value = json;
-        if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(json);
-        } else {
-            const textarea = overlay.querySelector('#sc_db_json');
-            textarea.focus();
-            textarea.select();
-            document.execCommand('copy');
+        try {
+            snapshot = getMemoryDatabaseSnapshot();
+            const json = JSON.stringify(snapshot, null, 2);
+            overlay.querySelector('#sc_db_json').value = json;
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(json);
+            } else {
+                const textarea = overlay.querySelector('#sc_db_json');
+                textarea.focus();
+                textarea.select();
+                document.execCommand('copy');
+            }
+            toastr.success('Memory database JSON copied.', 'Summaryception', { timeOut: 2000 });
+        } catch (e) {
+            console.error(LOG_PREFIX, 'Could not copy memory database JSON:', e);
+            toastr.error('Could not copy memory database JSON. Check console for details.', 'Summaryception');
         }
-        toastr.success('Memory database JSON copied.', 'Summaryception', { timeOut: 2000 });
     });
 
     overlay.querySelector('#sc_db_export_all').addEventListener('click', () => {
@@ -2416,8 +2615,53 @@ function bindUIEvents() {
         $(ta.id).on('change', function () {
             getSettings()[ta.key] = $(this).val();
             saveSettings();
+            if (ta.key === 'injectionTemplate') updateInjection();
         });
     }
+
+    $('#sc_injection_position').on('change', function () {
+        getSettings().injectionPosition = $(this).val();
+        saveSettings();
+        updateInjection();
+        updateUI();
+    });
+
+    $('#sc_injection_depth').on('input', function () {
+        const val = parseInt($(this).val(), 10);
+        getSettings().injectionDepth = Number.isFinite(val) ? val : defaultSettings.injectionDepth;
+        $('#sc_injection_depth_val').text(getSettings().injectionDepth);
+        saveSettings();
+        updateInjection();
+    });
+
+    $('#sc_injection_role').on('change', function () {
+        getSettings().injectionRole = $(this).val();
+        saveSettings();
+        updateInjection();
+        updateUI();
+    });
+
+    $('#sc_injection_scan').on('change', function () {
+        getSettings().injectionScan = $(this).prop('checked');
+        saveSettings();
+        updateInjection();
+    });
+
+    $('#sc_test_injection').on('click', function () {
+        const hadSummary = updateInjection();
+        const ctx = SillyTavern.getContext();
+        const registered = ctx.extensionPrompts?.[MODULE_NAME];
+        if (!hadSummary || !registered?.value) {
+            toastr.warning('No Summaryception summary is currently available to inject. Create or import a summary first.', 'Summaryception', { timeOut: 5000 });
+            return;
+        }
+        const positionLabel = INJECTION_POSITION_LABELS[getSettings().injectionPosition] || 'Prompt';
+        toastr.success(
+            `Injection registered (${registered.value.length} chars, ${positionLabel}, role ${getSettings().injectionRole}). Check Prompt Inspector on the next generation to verify placement.`,
+            'Summaryception',
+            { timeOut: 7000 }
+        );
+    });
 
     $('#sc_debug_mode').on('change', function () {
         getSettings().debugMode = $(this).prop('checked');
