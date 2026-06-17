@@ -69,8 +69,13 @@ const defaultSettings = Object.freeze({
     traceMode: false,
 
     // ─── Connection Settings ─────────────────────────────────────
-    connectionSource: 'default',          // 'default' | 'profile' | 'ollama' | 'openai' | 'koboldcpp'
+    connectionSource: 'default',          // 'default' | 'profile' | 'ollama' | 'openai' | 'koboldcpp' | 'completion' | 'custom'
     summarizerResponseLength: 0,          // 0 = use preset default; set lower if you get "max_tokens > 4096 must have stream=true" errors
+    savedConnectionProfiles: [],
+    activeSavedConnectionProfileId: '',
+    summarizerTemperature: 0.3,
+    summarizerTimeoutMs: 120000,
+    summarizerStopSequences: [],
     connectionProfileId: '',              // ID of selected ST Connection Profile
     ollamaUrl: 'http://localhost:11434',
     ollamaModel: '',
@@ -84,6 +89,19 @@ const defaultSettings = Object.freeze({
     koboldcppUrl:    'http://localhost:5001',
     koboldcppPrefix: '<|im_start|>user\n',
     koboldcppSuffix: '<|im_end|>\n<|im_start|>assistant\n',
+
+    completionUrl: '',
+    completionKey: '',
+    completionModel: '',
+    completionPrefix: 'System:\n',
+    completionSuffix: '\nAssistant:',
+
+    customUrl: '',
+    customHeaders: '{"Content-Type":"application/json"}',
+    customBodyTemplate: '{\n  "model": "{{model}}",\n  "messages": [\n    { "role": "system", "content": "{{systemPrompt}}" },\n    { "role": "user", "content": "{{userPrompt}}" }\n  ],\n  "temperature": {{temperature}},\n  "stream": false\n}',
+    customResponsePath: 'choices.0.message.content',
+    customApiKey: '',
+    customModel: '',
 });
 
 // ─── Prompt Presets ──────────────────────────────────────────────────
@@ -1000,7 +1018,9 @@ async function callSummarizer(storyTxt, contextStr) {
                     promptLength: prompt.length,
                 });
 
-                const timeoutMs = 120000;
+                const timeoutMs = Number(s.summarizerTimeoutMs) > 0
+                    ? Number(s.summarizerTimeoutMs)
+                    : defaultSettings.summarizerTimeoutMs;
                 const result = await Promise.race([
                     sendSummarizerRequest(s, s.summarizerSystemPrompt, prompt),
                     new Promise((_, reject) => {
@@ -1854,6 +1874,16 @@ function registerSlashCommands() {
             helpString: 'Preview the summary block that would be injected',
         }));
 
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'sc-injected',
+            callback: () => {
+                const registered = SillyTavern.getContext().extensionPrompts?.[MODULE_NAME];
+                if (!registered?.value) return '(No Summaryception injection is currently registered)';
+                return registered.value;
+            },
+            helpString: 'Show the Summaryception prompt currently registered with SillyTavern',
+        }));
+
 
         SlashCommandParser.addCommandObject(SlashCommand.fromProps({
             name: 'sc-db',
@@ -1958,11 +1988,33 @@ function updateUI() {
 
         const preview = assembleSummaryBlock();
         $('#sc_preview').val(preview || '(empty — no summaries yet)');
+        updateInjectionInspector(preview);
 
         updateSnippetBrowser();
     } catch (e) {
         log('updateUI error:', e);
     }
+}
+
+function estimateTokens(text) {
+    return Math.ceil((text || '').length / 4);
+}
+
+function updateInjectionInspector(preview = assembleSummaryBlock()) {
+    const s = getSettings();
+    const registered = SillyTavern.getContext().extensionPrompts?.[MODULE_NAME];
+    const registeredValue = registered?.value || '';
+    const matches = registeredValue === String(preview || '');
+    const positionLabel = INJECTION_POSITION_LABELS[s.injectionPosition] || 'Prompt';
+    const html = [
+        `<div class="sc-layer-stat">🔎 Registered: <strong>${registeredValue ? 'yes' : 'no'}</strong> · matches preview: <strong>${matches ? 'yes' : 'no'}</strong></div>`,
+        `<div class="sc-layer-stat">📌 Position: <strong>${escapeHtml(positionLabel)}</strong>${s.injectionPosition === 'in_chat' ? ` at depth ${getInjectionDepthValue(s)}` : ''} · role: <strong>${escapeHtml(s.injectionRole || 'system')}</strong> · World Info scan: <strong>${s.injectionScan ? 'on' : 'off'}</strong></div>`,
+        `<div class="sc-layer-stat">📏 Preview: <strong>${(preview || '').length}</strong> chars / ~${estimateTokens(preview)} tokens · Registered: <strong>${registeredValue.length}</strong> chars / ~${estimateTokens(registeredValue)} tokens</div>`,
+        registered && typeof registered === 'object'
+            ? `<details><summary>Raw registered extension prompt object</summary><pre>${escapeHtml(JSON.stringify(registered, null, 2))}</pre></details>`
+            : '',
+    ].join('');
+    $('#sc_injection_inspector').html(html);
 }
 
 function getMemoryBankLabel(key) {
@@ -2895,6 +2947,15 @@ function bindUIEvents() {
     });
 
     $('#sc_refresh_preview').on('click', () => updateUI());
+    $('#sc_copy_injected').on('click', async () => {
+        const value = SillyTavern.getContext().extensionPrompts?.[MODULE_NAME]?.value || '';
+        if (!value) {
+            toastr.warning('No Summaryception injection is currently registered.', 'Summaryception');
+            return;
+        }
+        await navigator.clipboard.writeText(value);
+        toastr.success('Registered Summaryception injection copied.', 'Summaryception');
+    });
 
     $('#sc_export').on('click', function () {
         const store = getChatStore();
@@ -3000,6 +3061,11 @@ function bindUIEvents() {
 function initConnectionUI() {
     const s = () => getSettings();
     const save = () => saveSettings();
+    renderSavedConnectionProfiles();
+
+    bindSimpleConnectionInput('summaryception_temperature', 'summarizerTemperature', v => Number.parseFloat(v) || defaultSettings.summarizerTemperature);
+    bindSimpleConnectionInput('summaryception_timeout_ms', 'summarizerTimeoutMs', v => Number.parseInt(v, 10) || defaultSettings.summarizerTimeoutMs);
+    bindSimpleConnectionInput('summaryception_stop_sequences', 'summarizerStopSequences', v => v.split('\n').map(x => x.trim()).filter(Boolean), v => (v || []).join('\n'));
 
     // ── Source dropdown ──
     const sourceSelect = document.getElementById('summaryception_connection_source');
@@ -3007,8 +3073,10 @@ function initConnectionUI() {
         sourceSelect.value = s().connectionSource || 'default';
         sourceSelect.addEventListener('change', () => {
             s().connectionSource = sourceSelect.value;
+            s().activeSavedConnectionProfileId = '';
             save();
             updateConnectionSubPanels(sourceSelect.value);
+            renderSavedConnectionProfiles();
         });
     }
 
@@ -3101,6 +3169,25 @@ function initConnectionUI() {
         });
     }
 
+    bindSimpleConnectionInput('summaryception_completion_url', 'completionUrl');
+    bindSimpleConnectionInput('summaryception_completion_key', 'completionKey');
+    bindSimpleConnectionInput('summaryception_completion_model', 'completionModel');
+    bindSimpleConnectionInput('summaryception_completion_prefix', 'completionPrefix', v => v.replace(/\\n/g, '\n'), v => (v || '').replace(/\n/g, '\\n'));
+    bindSimpleConnectionInput('summaryception_completion_suffix', 'completionSuffix', v => v.replace(/\\n/g, '\n'), v => (v || '').replace(/\n/g, '\\n'));
+    bindSimpleConnectionInput('summaryception_custom_url', 'customUrl');
+    bindSimpleConnectionInput('summaryception_custom_headers', 'customHeaders');
+    bindSimpleConnectionInput('summaryception_custom_body', 'customBodyTemplate');
+    bindSimpleConnectionInput('summaryception_custom_response_path', 'customResponsePath');
+    bindSimpleConnectionInput('summaryception_custom_api_key', 'customApiKey');
+    bindSimpleConnectionInput('summaryception_custom_model', 'customModel');
+
+    document.getElementById('summaryception_test_current')?.addEventListener('click', testCurrentConnectionHandler);
+    document.getElementById('summaryception_profile_save')?.addEventListener('click', saveCurrentConnectionProfile);
+    document.getElementById('summaryception_profile_update')?.addEventListener('click', updateSelectedConnectionProfile);
+    document.getElementById('summaryception_profile_duplicate')?.addEventListener('click', duplicateSelectedConnectionProfile);
+    document.getElementById('summaryception_profile_delete')?.addEventListener('click', deleteSelectedConnectionProfile);
+    document.getElementById('summaryception_saved_profile')?.addEventListener('change', loadSelectedConnectionProfile);
+
     // ── KoboldCPP URL ──
     const kcppUrl = document.getElementById('summaryception_kcpp_url');
     if (kcppUrl) {
@@ -3135,12 +3222,166 @@ function initConnectionUI() {
     updateConnectionSubPanels(s().connectionSource || 'default');
 }
 
+const CONNECTION_PROFILE_FIELDS = [
+    'connectionSource', 'summarizerResponseLength', 'summarizerTemperature', 'summarizerTimeoutMs', 'summarizerStopSequences',
+    'connectionProfileId', 'ollamaUrl', 'ollamaModel', 'openaiUrl', 'openaiKey', 'openaiModel', 'openaiMaxTokens',
+    'koboldcppUrl', 'koboldcppPrefix', 'koboldcppSuffix', 'completionUrl', 'completionKey', 'completionModel',
+    'completionPrefix', 'completionSuffix', 'customUrl', 'customHeaders', 'customBodyTemplate', 'customResponsePath',
+    'customApiKey', 'customModel',
+];
+
+function bindSimpleConnectionInput(id, key, fromUi = v => v.trim(), toUi = v => v ?? '') {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const sync = () => {
+        const value = getSettings()[key];
+        el.value = toUi(value);
+    };
+    sync();
+    el.addEventListener('input', () => {
+        getSettings()[key] = fromUi(el.value);
+        getSettings().activeSavedConnectionProfileId = '';
+        saveSettings();
+        renderSavedConnectionProfiles();
+    });
+}
+
+function captureConnectionProfileData() {
+    const s = getSettings();
+    return Object.fromEntries(CONNECTION_PROFILE_FIELDS.map(key => [key, structuredClone(s[key])]));
+}
+
+function applyConnectionProfileData(data) {
+    const s = getSettings();
+    for (const key of CONNECTION_PROFILE_FIELDS) {
+        if (Object.hasOwn(data, key)) s[key] = structuredClone(data[key]);
+    }
+    saveSettings();
+    syncConnectionUIFromSettings();
+}
+
+function renderSavedConnectionProfiles() {
+    const select = document.getElementById('summaryception_saved_profile');
+    if (!select) return;
+    const s = getSettings();
+    select.innerHTML = '<option value="">-- Current unsaved settings --</option>';
+    for (const profile of s.savedConnectionProfiles || []) {
+        const opt = document.createElement('option');
+        opt.value = profile.id;
+        opt.textContent = `${profile.name} (${profile.data?.connectionSource || 'default'})`;
+        select.appendChild(opt);
+    }
+    select.value = s.activeSavedConnectionProfileId || '';
+}
+
+function syncConnectionUIFromSettings() {
+    const s = getSettings();
+    const set = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.value = value ?? '';
+    };
+    set('summaryception_connection_source', s.connectionSource || 'default');
+    set('summaryception_connection_profile', s.connectionProfileId || '');
+    set('summaryception_ollama_url', s.ollamaUrl || '');
+    set('summaryception_ollama_model', s.ollamaModel || '');
+    set('summaryception_openai_url', s.openaiUrl || '');
+    set('summaryception_openai_key', s.openaiKey || '');
+    set('summaryception_openai_model', s.openaiModel || '');
+    set('summaryception_openai_max_tokens', s.openaiMaxTokens || 0);
+    set('summaryception_kcpp_url', s.koboldcppUrl || '');
+    set('summaryception_kcpp_prefix', (s.koboldcppPrefix || '').replace(/\n/g, '\\n'));
+    set('summaryception_kcpp_suffix', (s.koboldcppSuffix || '').replace(/\n/g, '\\n'));
+    set('summaryception_temperature', s.summarizerTemperature ?? defaultSettings.summarizerTemperature);
+    set('summaryception_timeout_ms', s.summarizerTimeoutMs ?? defaultSettings.summarizerTimeoutMs);
+    set('summaryception_stop_sequences', (s.summarizerStopSequences || []).join('\n'));
+    set('summaryception_completion_url', s.completionUrl || '');
+    set('summaryception_completion_key', s.completionKey || '');
+    set('summaryception_completion_model', s.completionModel || '');
+    set('summaryception_completion_prefix', (s.completionPrefix || '').replace(/\n/g, '\\n'));
+    set('summaryception_completion_suffix', (s.completionSuffix || '').replace(/\n/g, '\\n'));
+    set('summaryception_custom_url', s.customUrl || '');
+    set('summaryception_custom_headers', s.customHeaders || '');
+    set('summaryception_custom_body', s.customBodyTemplate || '');
+    set('summaryception_custom_response_path', s.customResponsePath || '');
+    set('summaryception_custom_api_key', s.customApiKey || '');
+    set('summaryception_custom_model', s.customModel || '');
+    updateConnectionSubPanels(s.connectionSource || 'default');
+    renderSavedConnectionProfiles();
+}
+
+function saveCurrentConnectionProfile() {
+    const name = prompt('Name this Summaryception connection profile:', getConnectionDisplayName(getSettings()));
+    if (!name) return;
+    const s = getSettings();
+    const profile = { id: `sc_${Date.now().toString(36)}`, name: name.trim(), data: captureConnectionProfileData(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    s.savedConnectionProfiles = [...(s.savedConnectionProfiles || []), profile];
+    s.activeSavedConnectionProfileId = profile.id;
+    saveSettings();
+    renderSavedConnectionProfiles();
+    toastr.success(`Saved connection profile "${profile.name}".`, 'Summaryception');
+}
+
+function getSelectedConnectionProfile() {
+    const id = document.getElementById('summaryception_saved_profile')?.value || getSettings().activeSavedConnectionProfileId;
+    return (getSettings().savedConnectionProfiles || []).find(profile => profile.id === id);
+}
+
+function updateSelectedConnectionProfile() {
+    const profile = getSelectedConnectionProfile();
+    if (!profile) return toastr.warning('Select a saved Summaryception profile first.', 'Summaryception');
+    profile.data = captureConnectionProfileData();
+    profile.updatedAt = new Date().toISOString();
+    getSettings().activeSavedConnectionProfileId = profile.id;
+    saveSettings();
+    renderSavedConnectionProfiles();
+    toastr.success(`Updated connection profile "${profile.name}".`, 'Summaryception');
+}
+
+function duplicateSelectedConnectionProfile() {
+    const profile = getSelectedConnectionProfile();
+    if (!profile) return toastr.warning('Select a saved Summaryception profile first.', 'Summaryception');
+    const copy = structuredClone(profile);
+    copy.id = `sc_${Date.now().toString(36)}`;
+    copy.name = `${profile.name} Copy`;
+    copy.createdAt = new Date().toISOString();
+    copy.updatedAt = copy.createdAt;
+    getSettings().savedConnectionProfiles.push(copy);
+    getSettings().activeSavedConnectionProfileId = copy.id;
+    saveSettings();
+    renderSavedConnectionProfiles();
+}
+
+function deleteSelectedConnectionProfile() {
+    const profile = getSelectedConnectionProfile();
+    if (!profile) return toastr.warning('Select a saved Summaryception profile first.', 'Summaryception');
+    if (!confirm(`Delete Summaryception connection profile "${profile.name}"?`)) return;
+    const s = getSettings();
+    s.savedConnectionProfiles = (s.savedConnectionProfiles || []).filter(item => item.id !== profile.id);
+    if (s.activeSavedConnectionProfileId === profile.id) s.activeSavedConnectionProfileId = '';
+    saveSettings();
+    renderSavedConnectionProfiles();
+}
+
+function loadSelectedConnectionProfile() {
+    const profile = getSelectedConnectionProfile();
+    if (!profile) {
+        getSettings().activeSavedConnectionProfileId = '';
+        saveSettings();
+        return;
+    }
+    getSettings().activeSavedConnectionProfileId = profile.id;
+    applyConnectionProfileData(profile.data || {});
+    toastr.success(`Loaded connection profile "${profile.name}".`, 'Summaryception');
+}
+
 function updateConnectionSubPanels(source) {
     const panels = {
         profile:   document.getElementById('summaryception_profile_settings'),
         ollama:    document.getElementById('summaryception_ollama_settings'),
         openai:    document.getElementById('summaryception_openai_settings'),
         koboldcpp: document.getElementById('summaryception_kcpp_settings'),
+        completion: document.getElementById('summaryception_completion_settings'),
+        custom: document.getElementById('summaryception_custom_settings'),
     };
 
     Object.values(panels).forEach(panel => {
@@ -3216,6 +3457,24 @@ async function testOpenAIConnectionHandler() {
     } else {
         showConnectionStatus('error', result.message);
         toastr.error(result.message, 'Summaryception');
+    }
+}
+
+async function testCurrentConnectionHandler() {
+    const s = getSettings();
+    showConnectionStatus('loading', `Testing ${getConnectionDisplayName(s)}...`);
+    const started = performance.now();
+    try {
+        const response = await Promise.race([
+            sendSummarizerRequest(s, 'You are a connection test assistant.', 'Reply with exactly: CONNECTION_OK'),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Connection test timed out')), s.summarizerTimeoutMs || defaultSettings.summarizerTimeoutMs)),
+        ]);
+        const elapsed = Math.round(performance.now() - started);
+        showConnectionStatus('success', `OK in ${elapsed}ms: ${(response || '').trim().slice(0, 160)}`);
+        toastr.success(`Connection test succeeded in ${elapsed}ms.`, 'Summaryception');
+    } catch (error) {
+        showConnectionStatus('error', `Failed: ${error.message || error}`);
+        toastr.error(`Connection test failed: ${error.message || error}`, 'Summaryception');
     }
 }
 

@@ -6,6 +6,8 @@
  *   - profile:  ST Connection Profile via ConnectionManagerRequestService
  *   - ollama:   Ollama instance (via ST CORS proxy to avoid browser CORS issues)
  *   - openai:   OpenAI-compatible endpoint (via ST CORS proxy, streaming supported)
+ *   - completion: generic /v1/completions-compatible endpoint
+ *   - custom:   user-templated HTTP JSON endpoint
  *
  * CORS Note: Ollama and OpenAI modes route through ST's /cors/ proxy endpoint
  * to avoid browser CORS restrictions. Requires enableCorsProxy: true in config.yaml
@@ -82,9 +84,13 @@ export async function sendSummarizerRequest(settings, systemPrompt, userPrompt) 
         case 'ollama':
             return await sendViaOllama(settings.ollamaUrl, settings.ollamaModel, systemPrompt, userPrompt);
         case 'openai':
-            return await sendViaOpenAI(settings.openaiUrl, settings.openaiKey, settings.openaiModel, systemPrompt, userPrompt, settings.openaiMaxTokens);
+            return await sendViaOpenAI(settings.openaiUrl, settings.openaiKey, settings.openaiModel, systemPrompt, userPrompt, settings.openaiMaxTokens, settings);
         case 'koboldcpp':
-            return await sendViaKoboldCPP(settings.koboldcppUrl, settings.koboldcppPrefix, settings.koboldcppSuffix, systemPrompt, userPrompt);
+            return await sendViaKoboldCPP(settings.koboldcppUrl, settings.koboldcppPrefix, settings.koboldcppSuffix, systemPrompt, userPrompt, settings);
+        case 'completion':
+            return await sendViaCompletion(settings, systemPrompt, userPrompt);
+        case 'custom':
+            return await sendViaCustomHttp(settings, systemPrompt, userPrompt);
         case 'default':
         default:
             return await sendViaDefault(systemPrompt, userPrompt, settings.summarizerResponseLength);
@@ -420,7 +426,7 @@ export async function fetchOllamaModels(url) {
  * Routes through ST's CORS proxy for local endpoints.
  * Cloud endpoints skip the proxy since they have CORS headers.
  */
-async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTokens) {
+async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTokens, settings = {}) {
     if (!url) {
         throw new ConnectionError(
             'OpenAI Compatible URL is not configured. Please set it in Summaryception settings.',
@@ -465,13 +471,16 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
         ],
-        temperature: 0.8,
+        temperature: Number(settings.summarizerTemperature ?? 0.3),
         stream: true,
     };
 
     // Only include max_tokens if explicitly set
     if (tokenLimit) {
         requestBody.max_tokens = tokenLimit;
+    }
+    if (Array.isArray(settings.summarizerStopSequences) && settings.summarizerStopSequences.length > 0) {
+        requestBody.stop = settings.summarizerStopSequences;
     }
 
     const body = JSON.stringify(requestBody);
@@ -627,7 +636,7 @@ export async function testOpenAIConnection(url, apiKey, model) {
  * FORK NOTE: This is the KoboldCPP direct mode added in this fork.
  * Search "Mode 5" to find it when merging upstream updates.
  */
-async function sendViaKoboldCPP(url, instructPrefix, instructSuffix, systemPrompt, userPrompt) {
+async function sendViaKoboldCPP(url, instructPrefix, instructSuffix, systemPrompt, userPrompt, settings = {}) {
     if (!url) {
         throw new Error('KoboldCPP URL is not configured. Please set it in Summaryception settings.');
     }
@@ -649,12 +658,14 @@ async function sendViaKoboldCPP(url, instructPrefix, instructSuffix, systemPromp
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             prompt:             fullPrompt,
-            max_tokens:         2000,
+            max_tokens:         settings.openaiMaxTokens || 2000,
             max_context_length: maxCtx,
-            temperature:        0.3,
+            temperature:        Number(settings.summarizerTemperature ?? 0.3),
             top_p:              0.9,
             frequency_penalty:  0.2,
-            stop: ['<|im_end|>', '<|eot_id|>', '<|end|>', '<|im_start|>'],
+            stop: settings.summarizerStopSequences?.length
+                ? settings.summarizerStopSequences
+                : ['<|im_end|>', '<|eot_id|>', '<|end|>', '<|im_start|>'],
         }),
     });
 
@@ -671,6 +682,92 @@ async function sendViaKoboldCPP(url, instructPrefix, instructSuffix, systemPromp
     }
 
     return text.trim();
+}
+
+// ─── Mode 6: Generic Completion API ─────────────────────────────────
+
+async function sendViaCompletion(settings, systemPrompt, userPrompt) {
+    if (!settings.completionUrl) {
+        throw new ConnectionError('Completion API URL is not configured.', { retryable: false });
+    }
+    const prefix = (settings.completionPrefix ?? '').replace(/\\n/g, '\n');
+    const suffix = (settings.completionSuffix ?? '').replace(/\\n/g, '\n');
+    const prompt = `${prefix}${systemPrompt}\n\n${userPrompt}${suffix}`;
+    const headers = { 'Content-Type': 'application/json' };
+    if (settings.completionKey) headers.Authorization = `Bearer ${settings.completionKey}`;
+    const body = {
+        prompt,
+        temperature: Number(settings.summarizerTemperature ?? 0.3),
+        max_tokens: settings.openaiMaxTokens || settings.summarizerResponseLength || 512,
+    };
+    if (settings.completionModel) body.model = settings.completionModel;
+    if (settings.summarizerStopSequences?.length) body.stop = settings.summarizerStopSequences;
+    const response = await fetch(settings.completionUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        throw new ConnectionError(`Completion API request failed (${response.status}): ${errorText}`, {
+            retryable: response.status >= 500 || response.status === 429,
+            status: response.status,
+        });
+    }
+    const data = await response.json();
+    const text = data?.choices?.[0]?.text ?? data?.content ?? data?.response ?? data?.text ?? '';
+    if (!String(text).trim()) {
+        throw new ConnectionError('Completion API returned an empty response.', { retryable: true });
+    }
+    return String(text).trim();
+}
+
+// ─── Mode 7: Custom HTTP JSON ───────────────────────────────────────
+
+function replaceTemplateVars(template, vars) {
+    return String(template || '').replace(/{{(systemPrompt|userPrompt|model|apiKey|temperature|maxTokens)}}/g, (_, key) => {
+        const value = vars[key] ?? '';
+        return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+    });
+}
+
+function getPathValue(obj, path) {
+    return String(path || '').split('.').filter(Boolean).reduce((acc, key) => {
+        const normalizedKey = /^\d+$/.test(key) ? Number(key) : key;
+        return acc?.[normalizedKey];
+    }, obj);
+}
+
+async function sendViaCustomHttp(settings, systemPrompt, userPrompt) {
+    if (!settings.customUrl) {
+        throw new ConnectionError('Custom HTTP URL is not configured.', { retryable: false });
+    }
+    const vars = {
+        systemPrompt,
+        userPrompt,
+        model: settings.customModel || settings.openaiModel || settings.completionModel || '',
+        apiKey: settings.customApiKey || settings.openaiKey || settings.completionKey || '',
+        temperature: Number(settings.summarizerTemperature ?? 0.3),
+        maxTokens: settings.openaiMaxTokens || settings.summarizerResponseLength || 512,
+    };
+    let headers;
+    let body;
+    try {
+        headers = JSON.parse(replaceTemplateVars(settings.customHeaders || '{}', vars));
+        body = JSON.parse(replaceTemplateVars(settings.customBodyTemplate || '{}', vars));
+    } catch (error) {
+        throw new ConnectionError(`Custom HTTP JSON template is invalid: ${error.message}`, { retryable: false });
+    }
+    const response = await fetch(settings.customUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        throw new ConnectionError(`Custom HTTP request failed (${response.status}): ${errorText}`, {
+            retryable: response.status >= 500 || response.status === 429,
+            status: response.status,
+        });
+    }
+    const data = await response.json();
+    const value = getPathValue(data, settings.customResponsePath) ?? data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? data?.response ?? data?.content;
+    if (!String(value || '').trim()) {
+        throw new ConnectionError('Custom HTTP response path returned empty content.', { retryable: true });
+    }
+    return String(value).trim();
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -719,6 +816,10 @@ export function getConnectionDisplayName(settings) {
             return `OpenAI: ${settings.openaiModel || '(no model)'}`;
         case 'koboldcpp':
             return `KoboldCPP: ${settings.koboldcppUrl || '(no URL)'}`;
+        case 'completion':
+            return `Completion API: ${settings.completionModel || settings.completionUrl || '(not configured)'}`;
+        case 'custom':
+            return `Custom HTTP: ${settings.customModel || settings.customUrl || '(not configured)'}`;
         default:
             return 'Default (Main API)';
     }

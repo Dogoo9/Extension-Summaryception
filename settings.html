@@ -63,7 +63,11 @@
                 <button id="sc_refresh_preview" class="menu_button">
                     <i class="fa-solid fa-rotate"></i> Refresh
                 </button>
+                <button id="sc_copy_injected" class="menu_button">
+                    <i class="fa-solid fa-copy"></i> Copy Registered Injection
+                </button>
             </div>
+            <div id="sc_injection_inspector" class="sc-stats-box"></div>
 
             <div class="sc-button-row">
                 <button id="sc_import" class="menu_button">
@@ -127,7 +131,40 @@
                                 <option value="ollama">Ollama (Local)</option>
                                 <option value="openai">OpenAI Compatible</option>
                                 <option value="koboldcpp">KoboldCPP (Direct)</option>
+                                <option value="completion">Completion API</option>
+                                <option value="custom">Custom HTTP JSON</option>
                             </select>
+                        </div>
+
+                        <div class="summaryception-setting-row">
+                            <label for="summaryception_saved_profile">
+                                <span>Saved Summaryception Profile</span>
+                                <small>Save and reload Summaryception-specific connection settings without changing SillyTavern profiles.</small>
+                            </label>
+                            <select id="summaryception_saved_profile" class="text_pole">
+                                <option value="">-- Current unsaved settings --</option>
+                            </select>
+                        </div>
+                        <div class="sc-button-row">
+                            <button id="summaryception_profile_save" class="menu_button" type="button"><i class="fa-solid fa-floppy-disk"></i> Save Current</button>
+                            <button id="summaryception_profile_update" class="menu_button" type="button"><i class="fa-solid fa-pen-to-square"></i> Update Selected</button>
+                            <button id="summaryception_profile_duplicate" class="menu_button" type="button"><i class="fa-solid fa-copy"></i> Duplicate</button>
+                            <button id="summaryception_profile_delete" class="menu_button menu_button_danger" type="button"><i class="fa-solid fa-trash"></i> Delete</button>
+                        </div>
+                        <div class="summaryception-setting-row">
+                            <label for="summaryception_temperature"><span>Temperature</span><small>Used by direct HTTP sources when supported.</small></label>
+                            <input id="summaryception_temperature" type="number" class="text_pole" min="0" max="2" step="0.05" placeholder="0.3" />
+                        </div>
+                        <div class="summaryception-setting-row">
+                            <label for="summaryception_timeout_ms"><span>Request Timeout (ms)</span><small>Applies to Summaryception's request race and direct source fetches.</small></label>
+                            <input id="summaryception_timeout_ms" type="number" class="text_pole" min="1000" step="1000" placeholder="120000" />
+                        </div>
+                        <div class="summaryception-setting-row">
+                            <label for="summaryception_stop_sequences"><span>Stop Sequences</span><small>One per line. Used by direct OpenAI-compatible, completion, and KoboldCPP sources when supported.</small></label>
+                            <textarea id="summaryception_stop_sequences" class="text_pole sc-textarea" rows="3"></textarea>
+                        </div>
+                        <div class="sc-button-row">
+                            <button id="summaryception_test_current" class="menu_button" type="button"><i class="fa-solid fa-plug-circle-check"></i> Test Current Source</button>
                         </div>
 
                         <!-- ── Connection Profile Sub-panel ── -->
@@ -265,6 +302,25 @@
                                     Adjust Prefix/Suffix to match your loaded model's instruct format.
                                 </small>
                             </div>
+                        </div>
+
+                        <!-- ── Generic Completion API Sub-panel ── -->
+                        <div id="summaryception_completion_settings" class="summaryception-sub-panel" style="display: none;">
+                            <div class="summaryception-setting-row"><label for="summaryception_completion_url"><span>Completion Endpoint URL</span></label><input id="summaryception_completion_url" type="text" class="text_pole" placeholder="http://localhost:5001/v1/completions" /></div>
+                            <div class="summaryception-setting-row"><label for="summaryception_completion_key"><span>API Key</span></label><input id="summaryception_completion_key" type="password" class="text_pole" placeholder="(optional)" autocomplete="off" /></div>
+                            <div class="summaryception-setting-row"><label for="summaryception_completion_model"><span>Model Name</span></label><input id="summaryception_completion_model" type="text" class="text_pole" placeholder="optional for many local servers" /></div>
+                            <div class="summaryception-setting-row"><label for="summaryception_completion_prefix"><span>Prompt Prefix <small>(\n = newline)</small></span></label><input id="summaryception_completion_prefix" type="text" class="text_pole" placeholder="System:\n" /></div>
+                            <div class="summaryception-setting-row"><label for="summaryception_completion_suffix"><span>Prompt Suffix <small>(\n = newline)</small></span></label><input id="summaryception_completion_suffix" type="text" class="text_pole" placeholder="\nAssistant:" /></div>
+                        </div>
+
+                        <!-- ── Custom HTTP JSON Sub-panel ── -->
+                        <div id="summaryception_custom_settings" class="summaryception-sub-panel" style="display: none;">
+                            <div class="summaryception-setting-row"><label for="summaryception_custom_url"><span>Request URL</span></label><input id="summaryception_custom_url" type="text" class="text_pole" placeholder="https://example.com/v1/chat/completions" /></div>
+                            <div class="summaryception-setting-row"><label for="summaryception_custom_headers"><span>Headers JSON</span><small>Use {{apiKey}} if needed. Example: {"Authorization":"Bearer {{apiKey}}"}</small></label><textarea id="summaryception_custom_headers" class="text_pole sc-textarea" rows="4"></textarea></div>
+                            <div class="summaryception-setting-row"><label for="summaryception_custom_body"><span>Body Template JSON</span><small>Available placeholders: {{systemPrompt}}, {{userPrompt}}, {{model}}, {{temperature}}, {{maxTokens}}.</small></label><textarea id="summaryception_custom_body" class="text_pole sc-textarea" rows="8"></textarea></div>
+                            <div class="summaryception-setting-row"><label for="summaryception_custom_response_path"><span>Response Path</span><small>Dot path to text, e.g. choices.0.message.content, choices.0.text, or response.</small></label><input id="summaryception_custom_response_path" type="text" class="text_pole" placeholder="choices.0.message.content" /></div>
+                            <div class="summaryception-setting-row"><label for="summaryception_custom_api_key"><span>API Key Placeholder Value</span></label><input id="summaryception_custom_api_key" type="password" class="text_pole" autocomplete="off" /></div>
+                            <div class="summaryception-setting-row"><label for="summaryception_custom_model"><span>Model Placeholder Value</span></label><input id="summaryception_custom_model" type="text" class="text_pole" /></div>
                         </div>
 
                         <!-- Connection Status Indicator -->
