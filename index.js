@@ -1,5 +1,5 @@
 /**
- * Summaryception v5.3.3 — Layered Recursive Summarization for SillyTavern
+ * Summaryception v5.5.4 — Layered Recursive Summarization for SillyTavern
  *
  * NON-DESTRUCTIVE: Uses SillyTavern's native /hide and /unhide commands
  * to exclude summarized messages from LLM context while keeping them
@@ -19,6 +19,7 @@ import {
 
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
+const EXTENSION_VERSION = '5.5.4';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
 // ─── Default Settings ────────────────────────────────────────────────
@@ -3548,7 +3549,6 @@ async function fetchProfilesFallback(selectElement, currentValue) {
 
 // ─── Initialization ──────────────────────────────────────────────────
 
-// ─── Initialization ──────────────────────────────────────────────────
 
 (async function init() {
     const {
@@ -3578,6 +3578,6 @@ async function fetchProfilesFallback(selectElement, currentValue) {
     eventSource.on(event_types.APP_READY, () => {
         updateInjection();
         updateUI();
-        console.log(LOG_PREFIX, 'v5.3.3 loaded. Connection Settings available');
+        log(`v${EXTENSION_VERSION} loaded. Connection Settings available`);
     });
 })();

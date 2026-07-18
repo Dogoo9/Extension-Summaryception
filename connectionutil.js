@@ -183,7 +183,7 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt) {
         throw new ConnectionError(
             'ConnectionManagerRequestService is not available. ' +
             'Your SillyTavern version may be too old. Requires ST with PR #3603 (March 2025+).',
-                                  { retryable: false }
+            { retryable: false }
         );
     }
 
@@ -207,9 +207,6 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt) {
         const raw = await service.sendRequest(profileId, messages, {
             ignoreInstruct: true,
         });
-
-        // Debug: log what we actually got back
-        console.log('[Summaryception][Connection] Profile sendRequest returned:', typeof raw, raw);
 
         // Handle various possible return types
         let result;
