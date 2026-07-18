@@ -46,7 +46,7 @@ And because each snippet is written with knowledge of all previous snippets, the
 YOUR CHAT (e.g., 200 turns)
 │
 │  Turns 1-180: Ghosted (hidden from LLM, still readable by you)
-│  Turns 181-200: Kept VERBATIM (7 most recent assistant turns)
+│  Turns 181-200: Kept VERBATIM (10 most recent assistant turns)
 │
 │  The ghosted turns have been compressed into:
 │
@@ -63,7 +63,7 @@ YOUR CHAT (e.g., 200 turns)
 │  │  Direct summaries of conversation turns  │
 │  │  Each covers ~3 turns                    │
 │  ├──────────────────────────────────────────┤
-│  │  VERBATIM TURNS (most recent 7)          │
+│  │  VERBATIM TURNS (most recent 10)         │
 │  │  Sent word-for-word to the LLM           │
 │  └──────────────────────────────────────────┘
 │
@@ -93,15 +93,15 @@ Each promotion merges 3 snippets into 1, so each layer multiplies turn coverage 
 
 | Layer | Snippets | Turns per Snippet | Total Turns Covered | ~Tokens |
 |---|---|---|---|---|
-| Verbatim | 7 turns | — | 7 | ~5,000 |
+| Verbatim | 10 turns | — | 10 | ~7,000 |
 | Layer 0 | 30 | 3 | 90 | ~2,100 |
 | Layer 1 | 30 | 9 | 270 | ~2,100 |
 | Layer 2 | 30 | 27 | 810 | ~2,100 |
 | Layer 3 | 30 | 81 | 2,430 | ~2,100 |
 | Layer 4 | 30 | 243 | 7,290 | ~2,100 |
-| **Total** | — | — | **~10,897 turns** | **~15,500 tokens** |
+| **Total** | — | — | **~10,900 turns** | **~17,500 tokens** |
 
-> **Nearly 11,000 turns of narrative history in ~16k tokens.**
+> **Nearly 11,000 turns of narrative history in ~18k tokens.**
 
 ### Conservative Estimate (smaller snippets at deeper layers)
 
@@ -109,15 +109,15 @@ In practice, deeper layers produce shorter snippets as they compress already-com
 
 | Layer | Snippets | Turns per Snippet | ~Tokens/Snippet | ~Layer Tokens |
 |---|---|---|---|---|
-| Verbatim | 7 turns | — | — | ~5,000 |
+| Verbatim | 10 turns | — | — | ~7,000 |
 | Layer 0 | 30 | 3 | ~80 | ~2,400 |
 | Layer 1 | 30 | 9 | ~70 | ~2,100 |
 | Layer 2 | 30 | 27 | ~60 | ~1,800 |
 | Layer 3 | 30 | 81 | ~50 | ~1,500 |
 | Layer 4 | 30 | 243 | ~40 | ~1,200 |
-| **Total** | — | — | — | **~14,000 tokens** |
+| **Total** | — | — | — | **~16,000 tokens** |
 
-> **~11,000 turns in ~14k tokens.** The raw conversation? Roughly **15–25 million tokens.** That's a compression ratio approaching **1,000:1**.
+> **~11,000 turns in ~16k tokens.** The raw conversation? Roughly **15–25 million tokens.** That's a compression ratio approaching **1,000:1**.
 
 For comparison, most roleplayers hit 17,500 tokens by **turn 10** with verbatim context. Summaryception uses the same budget to remember **eleven thousand**.
 
@@ -196,7 +196,7 @@ All settings are adjustable from the SillyTavern Extensions panel:
 
 | Setting | Default | Description |
 |---|---|---|
-| Verbatim Turns | 7 | Recent assistant turns kept word-for-word |
+| Verbatim Turns | 10 | Recent assistant turns kept word-for-word |
 | Turns per Batch | 3 | Oldest turns summarized together per trigger |
 | Snippets per Layer | 30 | Max snippets before promoting to next layer |
 | Snippets per Promotion | 3 | How many snippets merge on promotion |
