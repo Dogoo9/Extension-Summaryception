@@ -765,6 +765,68 @@ async function ghostMessagesUpTo(endIndex) {
     }
 }
 
+// ─── Branch Detection & Repair ───────────────────────────────────────
+
+/**
+ * Detect chat branches that copied Summaryception metadata past the new chat's
+ * end and trim stale snippets/ghost markers from every memory bank.
+ */
+async function repairIfBranched() {
+    const { chat } = SillyTavern.getContext();
+    if (!chat || chat.length === 0) return;
+
+    const chatLength = chat.length;
+    const repairedBanks = [];
+
+    // Ensure current metadata/migrations are initialized before scanning all
+    // stores, including inactive per-character banks.
+    getChatStore();
+
+    for (const [key, store] of getAllMemoryStores()) {
+        const oldSummarizedUpTo = store.summarizedUpTo;
+        const originalGhostedCount = store.ghostedIndices.length;
+        let removedSnippets = 0;
+
+        if (store.layers[0]) {
+            const before = store.layers[0].length;
+            store.layers[0] = store.layers[0].filter(snippet => {
+                if (!snippet.turnRange) return true;
+                return snippet.turnRange[1] < chatLength;
+            });
+            removedSnippets = before - store.layers[0].length;
+        }
+
+        store.ghostedIndices = store.ghostedIndices.filter(idx => idx < chatLength);
+
+        const needsRepair = oldSummarizedUpTo >= chatLength
+            || removedSnippets > 0
+            || store.ghostedIndices.length !== originalGhostedCount;
+
+        if (!needsRepair) {
+            continue;
+        }
+
+        recalculateSummarizedUpTo(store);
+        repairedBanks.push(getMemoryBankLabel(key));
+
+        log(
+            `Branch repair complete for ${key}. ` +
+            `removed snippets: ${removedSnippets}, ` +
+            `ghosted indices: ${originalGhostedCount} → ${store.ghostedIndices.length}, ` +
+            `summarizedUpTo: ${oldSummarizedUpTo} → ${store.summarizedUpTo}`
+        );
+    }
+
+    if (repairedBanks.length > 0) {
+        await saveChatStore();
+        toastr.info(
+            `Branch detected — trimmed stale Summaryception memory data in ${repairedBanks.length} bank${repairedBanks.length === 1 ? '' : 's'}.`,
+            'Summaryception — Branch Repair',
+            { timeOut: 6000 }
+        );
+    }
+}
+
 // ─── Assistant Turn Utilities ────────────────────────────────────────
 
 function getAssistantTurns(chat) {
@@ -1794,6 +1856,7 @@ function onChatChanged() {
     catchupDismissed = false;
     setTimeout(async () => {
         await activateCharacterMemoryStore();
+        await repairIfBranched();
         updateInjection();
         updateUI();
     }, 100);
