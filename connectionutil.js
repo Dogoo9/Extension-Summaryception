@@ -9,7 +9,7 @@
  *   - completion: generic /v1/completions-compatible endpoint
  *   - custom:   user-templated HTTP JSON endpoint
  *
- * CORS Note: Ollama and OpenAI modes route through ST's /cors/ proxy endpoint
+ * CORS Note: Ollama and OpenAI modes route through ST's /proxy/ endpoint
  * to avoid browser CORS restrictions. Requires enableCorsProxy: true in config.yaml
  * OR the target server must have permissive CORS headers.
  *
@@ -59,7 +59,7 @@ function proxiedUrl(url, useProxy = true) {
 
 /**
  * Get standard request headers including ST's CSRF token if available.
- * Required when routing through ST's /cors/ proxy.
+ * Required when routing through ST's /proxy/ endpoint.
  * @returns {object}
  */
 function getProxyHeaders() {
@@ -712,7 +712,9 @@ async function sendViaCompletion(settings, systemPrompt, userPrompt) {
 function replaceTemplateVars(template, vars) {
     return String(template || '').replace(/{{(systemPrompt|userPrompt|model|apiKey|temperature|maxTokens)}}/g, (_, key) => {
         const value = vars[key] ?? '';
-        return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+        // Strip JSON's surrounding quotes while retaining complete JSON escaping
+        // (including tabs, carriage returns, and other control characters).
+        return JSON.stringify(String(value)).slice(1, -1);
     });
 }
 
