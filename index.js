@@ -23,6 +23,65 @@ const EXTENSION_VERSION = '5.5.4';
 const shownMigrationWarnings = new Set();
 // const TRACE_MODE = true;  // ultra-verbose logging
 
+// ═══════════════════════════════════════════════════════════════════════
+//  TUNING — Centralised operational constants.
+//  Change these instead of hunting through function bodies.
+// ═══════════════════════════════════════════════════════════════════════
+
+const TUNING = Object.freeze({
+
+    // ── Retry / Resilience ─────────────────────────────────────────
+    maxRetries:               5,        // LLM call retry attempts before giving up
+    retryBaseDelay:           2_000,    // ms — initial back-off delay
+    retryMaxDelay:            60_000,   // ms — ceiling for exponential back-off
+    retryBackoffMultiplier:   2,        // exponential growth factor
+    retryableStatuses:        [429, 500, 502, 503, 504],
+    llmRequestTimeout:        120_000,  // ms — per-request hard timeout
+    consecutiveFailureLimit:  3,        // catchup aborts after this many failures in a row
+
+    // ── Backlog / Catchup ──────────────────────────────────────────
+    backlogMultiplier:        2,        // overflow > turnsPerSummary × this triggers catchup dialog
+
+    // ── Event Debouncing ───────────────────────────────────────────
+    messageReceivedDelay:     500,      // ms — delay after new message before summarisation check
+    chatChangedDelay:         100,      // ms — delay after chat switch before UI refresh
+    catchupInterBatchDelay:   200,      // ms — breathing room between catchup batches
+
+    // ── Progress Reporting ─────────────────────────────────────────
+    ghostProgressInterval:    10,       // update toast every N messages during ghost/unghost
+    repairProgressInterval:   5,        // update toast every N messages during repair scan
+
+    // ── Injection Position ─────────────────────────────────────────
+    // setExtensionPrompt(name, text, position, depth, scan, role)
+    injectionPosition:        1,        // 0 = system prompt, 1 = in-chat
+    injectionDepth:           12,       // messages from generation point
+    injectionScan:            false,    // watched by World Info?
+    injectionRole:            1,        // 0 = system, 1 = user, 2 = assistant
+
+    // ── Toast Durations (ms) ───────────────────────────────────────
+    // Named by intent so you can tune notification verbosity in one place.
+    toastShort:               1_500,
+    toastDefault:             2_000,
+    toastMedium:              3_000,
+    toastLong:                4_000,
+    toastLonger:              5_000,
+    toastExtended:            6_000,
+    toastError:               8_000,
+
+    // ── Connection UI ──────────────────────────────────────────────
+    connectionStatusTimeout:  8_000,    // ms — auto-hide the status indicator
+    stopButtonCooldown:       2_000,    // ms — brief disable after clicking Stop
+});
+
+// Legacy alias — keeps RETRY_CONFIG references readable without a noisy diff.
+const RETRY_CONFIG = Object.freeze({
+    maxRetries:         TUNING.maxRetries,
+    baseDelay:          TUNING.retryBaseDelay,
+    maxDelay:           TUNING.retryMaxDelay,
+    backoffMultiplier:  TUNING.retryBackoffMultiplier,
+    retryableStatuses:  TUNING.retryableStatuses,
+});
+
 // ─── Default Settings ────────────────────────────────────────────────
 
 // Retained solely so settings saved with the previous built-in narrative prompt
@@ -56,6 +115,8 @@ const defaultSettings = Object.freeze({
     snippetsPerLayer: 30,
     snippetsPerPromotion: 3,
     maxLayers: 5,
+    injectionTemplate: '\n\n<auto_injected_historical_context>\n[system guidance: this is a historical summary of messages that occurred prior to the oldest assistant message currently in context for this chat]\n{{summary}}\n</auto_injected_historical_context>\n\n',
+
     contextBudget: 4096,
     contextBudgetUnit: 'tokens',          // 'tokens' (estimated at 4 chars each) | 'characters'
     injectionTemplate: '[Summary of past events: {{summary}}]',
@@ -65,12 +126,33 @@ const defaultSettings = Object.freeze({
     injectionScan: false,                 // Include summary block in World Info scans
 
     summarizerSystemPrompt:
-        'You are a precise narrative-state tracker. You output only the summary line — no preamble, no commentary, no markdown.',
+        'Role: precise narrative-state tracker. Output only the summary line — no preamble, no commentary, no markdown.',
 
+    summarizerUserPrompt:
+        `<player_name>
+{{player_name}}
+</player_name>
+
+<prior_context>
+{{context_str}}
+</prior_context>
+
+<passage_in_question>
+{{story_txt}}
+</passage_in_question>
+
+Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context. If the passage_in_question has 2nd person point of view, 'you' pronoun in prose refers to the player. Use the player name in the summary output instead of 'you'.
+
+Focus on: character interactions, dialogue tone, and relationship dynamics; emotional beats and character motivations; atmosphere, mood, and sensory details that establish tone; narrative themes and subtext; names, location changes, and time; plot developments and unresolved tensions; details that distinguish this moment from any other.
+
+Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
+
+Write in short phrases, no more than 20; output must be a single line:`,
     summarizerUserPrompt: NARRATIVE_PROMPT,
 
     promptPreset: 'narrative',  // 'narrative' | 'gamestate' | 'custom'
     pauseSummarization: false,  // true = stop processing, keep injecting
+    disableGhosting: false,     // mark summarized ranges without hiding messages
     separateMemoryByCharacterCard: true,  // true = keep independent memory banks per active character card within each chat
 
     stripPatterns: [
@@ -124,19 +206,48 @@ const defaultSettings = Object.freeze({
 // ─── Prompt Presets ──────────────────────────────────────────────────
 
 const PROMPT_PRESETS = {
+    narrative: `<player_name>
+{{player_name}}
+</player_name>
+
+<prior_context>
+{{context_str}}
+</prior_context>
+
+<passage_in_question>
+{{story_txt}}
+</passage_in_question>
+
+Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context. If the passage_in_question has 2nd person point of view, 'you' pronoun in prose refers to the player. Use the player name in the final response instead of 'you'.
+
+IF prior_context has no content: include establishing details in the generated summary, extend the maximum number of short phrases up to 40.
     narrative: NARRATIVE_PROMPT,
 
-    gamestate: `<player_name>{{player_name}}</player_name>
-    <prior_context>{{context_str}}</prior_context>
-    <passage_in_question>{{story_txt}}</passage_in_question>
+Priority Elements: Time + location changes + narrative themes and subtext + sensory details that establish tone + atmosphere + mood + plot developments + proper names + character motivations + character interactions + dialogue tone + relationship dynamics + emotional beats + unresolved tensions.
 
-    Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context.
+Exclude anything insubstantial, fluff, or events already covered in prior_context.
 
-    Focus on: story progression, plot points, plans, tasks, quests; location changes and current location (reference by name); location interactables encountered, used, or discovered; significant changes to player, NPCs, locations, world, or setting.
+Write in short *phrases* — up to 20; final response must be a single line:`,
 
-    Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
-    Skip any passages that are empty, unclear, or lack significant content.
-    Write in short phrases, no more than 20; output must be a single line:`,
+    gamestate: `<player_name>
+{{player_name}}
+</player_name>
+
+<prior_context>
+{{context_str}}
+</prior_context>
+
+<passage_in_question>
+{{story_txt}}
+</passage_in_question>
+
+Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context.
+
+Focus on: story progression, plot points, plans, tasks, quests; location changes and current location (reference by name); location interactables encountered, used, or discovered; significant changes to player, NPCs, locations, world, or setting.
+
+Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
+Skip any passages that are empty, unclear, or lack significant content.
+Write in short phrases, no more than 20; output must be a single line:`,
 
     custom: null, // Uses whatever is in the textarea
 };
@@ -161,16 +272,6 @@ const INJECTION_POSITION_LABELS = Object.freeze({
     before_prompt: 'Before Prompt',
 });
 
-
-// ─── Retry Configuration ─────────────────────────────────────────────
-
-const RETRY_CONFIG = {
-    maxRetries: 5,
-    baseDelay: 2000,
-    maxDelay: 60000,
-    backoffMultiplier: 2,
-    retryableStatuses: [429, 500, 502, 503, 504],
-};
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -895,6 +996,24 @@ async function unghostAllMessages(storeOverride = null) {
 async function ghostMessagesUpTo(endIndex, startIndex = 0) {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
+    const s = getSettings();
+
+    // ── Phase 1: Mark metadata (fast, no DOM/command overhead) ──
+    let newlyGhosted = 0;
+    const rangeStart = startIndex;  // Only process from startIndex
+    const rangeEnd = endIndex;
+
+    for (let i = rangeStart; i <= rangeEnd; i++) {
+        const msg = chat[i];
+        if (!msg) continue;
+        if (msg.is_system && !msg.extra?.sc_ghosted) continue;
+        if (!msg.extra) msg.extra = {};
+        if (msg.extra.sc_ghosted) continue;
+
+        // Skip messages already hidden by the user (not by us)
+        if (msg.is_hidden) {
+            log(`Skipping message ${i} — already hidden by user`);
+            continue;
     const boundedStart = Math.max(0, Math.min(Number.isInteger(startIndex) ? startIndex : 0, chat.length));
     const boundedEnd = Math.min(Number.isInteger(endIndex) ? endIndex : -1, chat.length - 1);
     if (boundedStart > boundedEnd) return;
@@ -910,8 +1029,27 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0) {
             extendedTimeOut: 0,
             tapToDismiss: false,
         }
-    );
 
+        msg.extra.sc_ghosted = true;
+
+        if (!store.ghostedIndices.includes(i)) {
+            store.ghostedIndices.push(i);
+        }
+
+        newlyGhosted++;
+    }
+
+    // ── Phase 2: Single range-based /hide command (the expensive part) ──
+    if (!s.disableGhosting && newlyGhosted > 0) {
+        try {
+            // SillyTavern /hide supports inclusive ranges: /hide start-end
+            await SillyTavern.getContext().executeSlashCommandsWithOptions(
+                `/hide ${rangeStart}-${rangeEnd}`,
+                { showOutput: false }
+            );
+        } catch (e) {
+            console.error(LOG_PREFIX, `Failed to hide range ${rangeStart}-${rangeEnd}:`, e);
+        }
     let examined = 0;
     try {
         for (let i = boundedStart; i <= boundedEnd; i++) {
@@ -947,6 +1085,8 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0) {
         store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
         clearPersistentToast(progressToast);
     }
+
+    log(`Ghosted messages ${rangeStart}–${rangeEnd} (${newlyGhosted} newly marked)${s.disableGhosting ? ' (hiding disabled — metadata only)' : ''}`);
 }
 
 // ─── Branch Detection & Repair ───────────────────────────────────────
@@ -1594,6 +1734,21 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
 
+    // ─── FIX: Filter out turns that are at or before summarizedUpTo ───
+    const eligibleTurns = visibleTurns.filter(t => t.index > store.summarizedUpTo);
+    trace('  eligibleTurns after filtering:', eligibleTurns.length);
+
+    if (eligibleTurns.length === 0) {
+        log('All visible turns are already summarized — repairing ghosting...');
+        const turnsToGhost = visibleTurns.filter(t => t.index <= store.summarizedUpTo);
+        for (const t of turnsToGhost) {
+            await ghostMessage(t.index);
+        }
+        await saveChatStore();
+        trace('<<< EXITING summarizeOneBatchFromTurns - REPAIRED GHOSTING');
+        return false;
+    }
+
     const eligibleTurns = visibleTurns.filter(turn => turn.index > store.summarizedUpTo);
     const batchSize = Math.min(s.turnsPerSummary, eligibleTurns.length);
     const batch = eligibleTurns.slice(0, batchSize);
@@ -1602,6 +1757,21 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
     trace('  batchSize:', batchSize);
     trace('  batch prepared:', batch.length);
 
+    if (batch.length === 0) {
+        trace('<<< EXITING summarizeOneBatchFromTurns - EMPTY BATCH');
+        return false;
+    }
+
+    const startIdx = batch[0].index;
+    const endIdx = batch[batch.length - 1].index;
+
+    trace('  startIdx:', startIdx, 'endIdx:', endIdx);
+    trace('  store.summarizedUpTo:', store.summarizedUpTo);
+
+    if (!store.layers[0]) store.layers[0] = [];
+
+    // ─── Start from the message AFTER the last summarized one ───
+    const passageStart = store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1;
     try {
         if (batch.length === 0) {
             const summarizedVisibleTurns = visibleTurns.filter(turn => turn.index <= store.summarizedUpTo);
@@ -1618,6 +1788,13 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         const endIdx = batch[batch.length - 1].index;
         const passageStart = startIdx;
 
+    // ─── SANITY CHECK: passageStart should always be <= endIdx ───
+    if (passageStart > endIdx) {
+        trace('  CRITICAL: passageStart > endIdx! This should never happen.');
+        trace('  This likely means the batch was already summarized.');
+        trace('<<< EXITING - passageStart > endIdx');
+        return 'EMPTY_SKIP';
+    }
         trace('  startIdx:', startIdx, 'endIdx:', endIdx);
         trace('  store.summarizedUpTo:', store.summarizedUpTo);
         trace('  passageStart:', passageStart, 'endIdx:', endIdx);
@@ -1629,6 +1806,14 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         trace('  buildPassageFromRange returned, length:', storyTxt?.length ?? 'UNDEFINED');
 
         if (!storyTxt.trim()) {
+            trace('  <<< EXITING - storyTxt is empty after trim');
+            trace('  This suggests all messages in range [' + passageStart + ', ' + endIdx + '] are hidden or empty');
+
+            // --- FIX: Advance pointer so we don't get stuck on these empty indexes ---
+            store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
+            await saveChatStore();
+
+            return 'EMPTY_SKIP';
             store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
             await saveChatStore();
             trace('  Empty passage skipped; summarizedUpTo advanced to:', store.summarizedUpTo);
@@ -1744,6 +1929,10 @@ async function runCatchup(visibleTurns, overflow) {
                 trace('  >>> summarizeOneBatchFromTurns returned SUCCESS');
                 completed++;
                 consecutiveFailures = 0;
+            } else if (result === 'EMPTY_SKIP') {
+                trace('  >>> summarizeOneBatchFromTurns returned EMPTY_SKIP');
+                completed++;
+                consecutiveFailures = 0;
             } else if (result === CATCHUP_BATCH_RESULT.EMPTY_SKIP) {
                 trace('  >>> summarizeOneBatchFromTurns returned EMPTY_SKIP');
                 completed++;
@@ -1756,9 +1945,9 @@ async function runCatchup(visibleTurns, overflow) {
                 failed++;
                 consecutiveFailures++;
 
-                if (consecutiveFailures >= 3) {
+                if (consecutiveFailures >= TUNING.consecutiveFailureLimit) {
                     toastr.error(
-                        '3 consecutive failures — API may be down. Pausing catch-up. Progress saved; will resume on next message.',
+                        `${TUNING.consecutiveFailureLimit} consecutive failures — API may be down. Pausing catch-up. Progress saved; will resume on next message.`,
                         'Summaryception',
                         { timeOut: 8000 }
                     );
@@ -2093,6 +2282,7 @@ function updateInjection() {
 // ─── Event Handlers ──────────────────────────────────────────────────
 
 function onMessageReceived(messageIndex) {
+    if (!getSettings().enabled) return;
     try {
         const { chat } = SillyTavern.getContext();
         const msg = chat[messageIndex];
@@ -2102,7 +2292,7 @@ function onMessageReceived(messageIndex) {
                 await maybeSummarizeTurns();
                 updateInjection();
                 updateUI();
-            }, 500);
+            }, TUNING.messageReceivedDelay);
         }
     } catch (e) {
         log('onMessageReceived error:', e);
@@ -2230,6 +2420,7 @@ function updateUI() {
 
         $('#sc_enabled').prop('checked', s.enabled);
         $('#sc_pause_summarization').prop('checked', s.pauseSummarization);
+        $('#sc_disable_ghosting').prop('checked', s.disableGhosting);
         $('#sc_separate_by_character').prop('checked', s.separateMemoryByCharacterCard);
         $('#sc_verbatim_turns').val(s.verbatimTurns);
         $('#sc_verbatim_turns_val').text(s.verbatimTurns);
@@ -2973,6 +3164,11 @@ function bindUIEvents() {
                 { timeOut: 3000 }
             );
         }
+    });
+
+    $('#sc_disable_ghosting').on('change', function () {
+        getSettings().disableGhosting = $(this).prop('checked');
+        saveSettings();
     });
 
     $('#sc_separate_by_character').on('change', async function () {

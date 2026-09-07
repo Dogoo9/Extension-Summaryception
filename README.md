@@ -1,8 +1,6 @@
 # 🧠 Summaryception
 
-This is a fork of https://github.com/Lodactio/Extension-Summaryception repo, primary used by me for my own personal roleplay using GPT codex to assist with programming (I suck at it.). Feel free to take features from this fork or use them in any way you like.
-
-Additions so far include a dedicated KoboldCPP connection source and per chat memory database for each character.
+This fork tracks [Lodactio's upstream Summaryception](https://github.com/Lodactio/Extension-Summaryception) while adding flexible connection and memory-management features. It preserves upstream's normal setup and usage while adding KoboldCPP, generic completion, and custom HTTP sources; reusable connection profiles; configurable injection placement; a memory database viewer; and per-character memory banks.
 
 ### Layered Recursive Memory for SillyTavern
 
@@ -216,6 +214,7 @@ Plus fully customizable:
 - 📝 Summarizer system prompt
 - 📝 Summarizer user prompt (with `{{player_name}}`, `{{context_str}}`, `{{story_txt}}` variables)
 - 📝 Injection wrapper template
+- 📍 Injection position, in-chat depth, role, and World Info scanning
 
 
 ---
@@ -244,8 +243,13 @@ Summaryception can use different backends for summarization, independent of your
 | **OpenAI Compatible** | Direct endpoint with URL, API key, and model — bypasses all ST formatting |
 | **Ollama** | Local Ollama instance with model browser |
 | **Connection Profile** | Uses an ST Connection Profile (⚠️ inherits preset formatting — may degrade summary quality) |
+| **KoboldCPP** | Direct `/v1/completions` access with configurable instruct prefix and suffix |
+| **Completion API** | Generic completion endpoint with API key, model, and prompt wrappers |
+| **Custom HTTP JSON** | User-defined headers, request-body template, and response JSON path |
 
 > 💡 **Recommended:** Use **Default** or **OpenAI Compatible** for cleanest results. Connection Profiles inject preset formatting into summary requests, which can cause the model to roleplay instead of summarize.
+
+Fork connection settings can be saved as named profiles, updated, duplicated, and restored independently of SillyTavern's own Connection Profiles. Direct-source temperature, timeout, and stop-sequence controls are saved with each profile.
 
 ---
 
@@ -253,7 +257,9 @@ Summaryception can use different backends for summarization, independent of your
 
 - **Layer Stats** — Live view of snippet counts per layer, active character-card bank, and ghosted message count
 - **Injection Preview** — See exactly what gets sent to the LLM
+- **Injection Inspector** — Verify the registered position, depth, role, and injected text
 - **Snippet Browser** — Browse, edit, regenerate, and delete individual snippets across all layers
+- **Memory Database Viewer** — Search and inspect every character bank, edit or delete snippets, export a bank, and inspect its raw JSON
 - **Export/Import** — Save and restore the active memory bank as JSON
 - **Force Summarize** — Manually trigger summarization
 - **Stop** — Abort any running summarization, progress saved
@@ -294,6 +300,24 @@ Restart SillyTavern and enable the extension.
 | **Lost information** | Lots — hedged by keeping more raw turns | None — every state change is tracked |
 | **Coherence over time** | Degrades as context grows | Stable indefinitely |
 | **Works with budget models** | Poorly — needs powerful summarizer | Excellently — prompt does the heavy lifting |
+
+---
+
+## Community Forks
+
+These forks extend Summaryception with specialized features. They use the same internal module name, so **install only one at a time** — your existing settings and per-chat memory will carry over.
+
+### [Per-Character Memory Banks](https://github.com/dogoo9/Extension-Summaryception) by dogoo9
+
+Keeps separate summary memory for each character card in the same chat. Useful for group chats or stories where you switch between characters and don't want their memories bleeding together.
+
+### [Lorebook Ingestion](https://github.com/jeromehbonaparte-star/Extension-Summaryception-Lorebook) by Romuromylus
+
+Automatically extracts stable facts (character traits, locations, items) from summaries and proposes them as World Info entries. Summaries handle events and state changes; lorebook entries handle things that should never be forgotten across layers. Includes a review queue so nothing gets written without your approval.
+
+### [Verdash's Summaryception](https://github.com/vadash/Extension-Summaryception) By Verdash
+
+Highly Polished Summaryception with many requested features by the community and superior context management.
 
 ---
 
