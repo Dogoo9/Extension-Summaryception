@@ -1350,6 +1350,11 @@ async function summarizeOneBatch(visibleTurns) {
 
 // ─── Core: Inner Batch for Catchup ───────────────────────────────────
 
+const CATCHUP_BATCH_RESULT = Object.freeze({
+    EMPTY_SKIP: 'EMPTY_SKIP',
+    NO_ELIGIBLE: 'NO_ELIGIBLE',
+});
+
 async function summarizeOneBatchFromTurns(visibleTurns) {
     trace('>>> ENTERING summarizeOneBatchFromTurns');
     trace('  visibleTurns:', visibleTurns?.length ?? 'UNDEFINED');
@@ -1358,59 +1363,46 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
 
-    const batchSize = Math.min(s.turnsPerSummary, visibleTurns.length);
-    const batch = visibleTurns.slice(0, batchSize);
+    const eligibleTurns = visibleTurns.filter(turn => turn.index > store.summarizedUpTo);
+    const batchSize = Math.min(s.turnsPerSummary, eligibleTurns.length);
+    const batch = eligibleTurns.slice(0, batchSize);
 
+    trace('  eligibleTurns:', eligibleTurns.length);
     trace('  batchSize:', batchSize);
     trace('  batch prepared:', batch.length);
 
-    if (batch.length === 0) {
-        trace('<<< EXITING summarizeOneBatchFromTurns - EMPTY BATCH');
-        return false;
-    }
-
-    const startIdx = batch[0].index;
-    const endIdx = batch[batch.length - 1].index;
-
-    trace('  startIdx:', startIdx, 'endIdx:', endIdx);
-    trace('  store.summarizedUpTo:', store.summarizedUpTo);
-
-    // ─── FIX: Ensure batch is actually after the summarized point ───
-    // If this batch starts BEFORE summarizedUpTo, skip it entirely
-    if (startIdx <= store.summarizedUpTo) {
-        trace('  SKIP: batch startIdx (' + startIdx + ') is <= summarizedUpTo (' + store.summarizedUpTo + ')');
-        trace('<<< EXITING - batch is before summarized point');
-        return false;
-    }
-
-    if (!store.layers[0]) store.layers[0] = [];
-
-    // ─── FIX: Start from the message AFTER the last summarized one ───
-    const passageStart = Math.max(
-        batch[0].index,
-        store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1
-    );
-
-    trace('  passageStart:', passageStart, 'endIdx:', endIdx);
-
-    // ─── SANITY CHECK: passageStart should always be <= endIdx ───
-    if (passageStart > endIdx) {
-        trace('  CRITICAL: passageStart > endIdx! This should never happen.');
-        trace('  This likely means the batch was already summarized.');
-        trace('<<< EXITING - passageStart > endIdx');
-        return false;
-    }
-
-    trace('  About to call buildPassageFromRange...');
-
     try {
+        if (batch.length === 0) {
+            const summarizedVisibleTurns = visibleTurns.filter(turn => turn.index <= store.summarizedUpTo);
+            trace('  No eligible turns; re-ghosting summarized visible turns:', summarizedVisibleTurns.length);
+            for (const turn of summarizedVisibleTurns) {
+                await ghostMessage(turn.index);
+            }
+            await saveChatStore();
+            trace('<<< EXITING summarizeOneBatchFromTurns - NO_ELIGIBLE');
+            return CATCHUP_BATCH_RESULT.NO_ELIGIBLE;
+        }
+
+        const startIdx = batch[0].index;
+        const endIdx = batch[batch.length - 1].index;
+        const passageStart = startIdx;
+
+        trace('  startIdx:', startIdx, 'endIdx:', endIdx);
+        trace('  store.summarizedUpTo:', store.summarizedUpTo);
+        trace('  passageStart:', passageStart, 'endIdx:', endIdx);
+
+        if (!store.layers[0]) store.layers[0] = [];
+
+        trace('  About to call buildPassageFromRange...');
         const storyTxt = buildPassageFromRange(chat, passageStart, endIdx);
         trace('  buildPassageFromRange returned, length:', storyTxt?.length ?? 'UNDEFINED');
 
         if (!storyTxt.trim()) {
-            trace('  <<< EXITING - storyTxt is empty after trim');
-            trace('  This suggests all messages in range [' + passageStart + ', ' + endIdx + '] are hidden or empty');
-            return false;
+            store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
+            await saveChatStore();
+            trace('  Empty passage skipped; summarizedUpTo advanced to:', store.summarizedUpTo);
+            trace('<<< EXITING summarizeOneBatchFromTurns - EMPTY_SKIP');
+            return CATCHUP_BATCH_RESULT.EMPTY_SKIP;
         }
 
         trace('  About to call buildFullContext...');
@@ -1514,11 +1506,18 @@ async function runCatchup(visibleTurns, overflow) {
             }
 
             trace('  About to call summarizeOneBatchFromTurns...');
-            const success = await summarizeOneBatchFromTurns(currentVisible);
+            const result = await summarizeOneBatchFromTurns(currentVisible);
 
-            if (success) {
+            if (result === true) {
                 trace('  >>> summarizeOneBatchFromTurns returned SUCCESS');
                 completed++;
+                consecutiveFailures = 0;
+            } else if (result === CATCHUP_BATCH_RESULT.EMPTY_SKIP) {
+                trace('  >>> summarizeOneBatchFromTurns returned EMPTY_SKIP');
+                completed++;
+                consecutiveFailures = 0;
+            } else if (result === CATCHUP_BATCH_RESULT.NO_ELIGIBLE) {
+                trace('  >>> summarizeOneBatchFromTurns returned NO_ELIGIBLE');
                 consecutiveFailures = 0;
             } else {
                 trace('  >>> summarizeOneBatchFromTurns returned FAILURE');
