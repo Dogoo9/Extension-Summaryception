@@ -18,6 +18,13 @@
 
 const MODULE_NAME = '[Summaryception][Connection]';
 
+const LLM_DEFAULTS = Object.freeze({
+    ollamaTemperature: 0.3,
+    openaiTemperature: 0.8,
+    testMaxTokens: 100,
+    testPreviewLength: 100,
+});
+
 // ─── Custom Error Class ──────────────────────────────────────────────
 
 /**
@@ -47,7 +54,7 @@ export { ConnectionError };
  */
 function proxiedUrl(url, useProxy = true) {
     if (!useProxy) return url;
-    return `/cors/${url}`;
+    return `/proxy/${url}`;
 }
 
 /**
@@ -314,7 +321,7 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt) {
                 ],
                 stream: false,
                 options: {
-                    temperature: 0.3,
+                    temperature: LLM_DEFAULTS.ollamaTemperature,
                 },
             }),
         });
@@ -331,7 +338,7 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt) {
                         { role: 'user', content: userPrompt },
                     ],
                     stream: false,
-                    options: { temperature: 0.3 },
+                    options: { temperature: LLM_DEFAULTS.ollamaTemperature },
                 }),
             });
         } catch (directError) {
@@ -465,7 +472,7 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
         ],
-        temperature: Number(settings.summarizerTemperature ?? 0.3),
+        temperature: Number(settings.summarizerTemperature ?? LLM_DEFAULTS.openaiTemperature),
         stream: true,
     };
 
@@ -593,11 +600,11 @@ export async function testOpenAIConnection(url, apiKey, model) {
             model || 'test',
             'You are a test assistant.',
             'Respond with exactly: CONNECTION_OK',
-            100 // small token limit for test
+            LLM_DEFAULTS.testMaxTokens
         );
         return {
             success: true,
-            message: `Connection successful! Response: "${result.substring(0, 100)}"`,
+            message: `Connection successful! Response: "${result.substring(0, LLM_DEFAULTS.testPreviewLength)}"`,
         };
     } catch (error) {
         return {
