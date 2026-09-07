@@ -224,12 +224,12 @@ Plus fully customizable:
 
 Summaryception can keep memory separated by the active character card inside each chat. When **Separate memory per character card** is enabled, the extension stores the current card's summaries in its own memory bank under the chat metadata. Switching to another card in the same chat selects that card's bank, so injected summaries, the snippet browser, exports, imports, and `/sc-status` all operate on the active card's memory.
 
-Existing single-bank memories are migrated automatically to the currently active card the first time the feature is used.
+Existing single-bank memories are migrated automatically to the currently active card the first time the feature is used. Banks now retain a card identity record (stable SillyTavern card identifier when available, normalized avatar/card filename, display name, and former keys). Legacy numeric-id banks are migrated only when their saved attachment matches the active card; ambiguous matches remain separate and are called out in the database viewer and exports.
 
 ### Limitations
 
 - SillyTavern message hiding is still a chat-level operation. Summaryception will unghost the previous card's tracked messages and re-ghost the active card's tracked range when the active card changes, but two character banks cannot hide conflicting ranges at the same time.
-- The character key is based on SillyTavern's active character id when available, with card name/avatar fallbacks. Renaming or duplicating cards can create a new bank if SillyTavern exposes them as different cards.
+- The character key prefers SillyTavern's persistent card identifier, then a normalized avatar/card filename. The positional character id is used only as a session-local last resort. Replacing a card file can therefore intentionally create a new bank.
 - This is designed for separating Summaryception memories; it does not isolate SillyTavern's own chat file, lorebooks, or other extensions' metadata.
 
 ---
