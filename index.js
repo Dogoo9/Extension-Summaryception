@@ -20,6 +20,7 @@ import {
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
 const EXTENSION_VERSION = '5.5.4';
+const shownMigrationWarnings = new Set();
 // const TRACE_MODE = true;  // ultra-verbose logging
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -83,6 +84,30 @@ const RETRY_CONFIG = Object.freeze({
 
 // ─── Default Settings ────────────────────────────────────────────────
 
+// Retained solely so settings saved with the previous built-in narrative prompt
+// can be upgraded without mistaking a user-authored prompt for a preset.
+const PREVIOUS_NARRATIVE_PROMPT = `<player_name>{{player_name}}</player_name>
+    <prior_context>{{context_str}}</prior_context>
+    <passage_in_question>{{story_txt}}</passage_in_question>
+
+    Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context.
+
+    Focus on: character interactions, dialogue tone, and relationship dynamics; emotional beats and character motivations; atmosphere, mood, and sensory details that establish tone; narrative themes and subtext; names, places, and time references; plot developments and unresolved tensions; details that distinguish this moment from any other.
+
+    Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
+    Skip any passages that are empty, unclear, or lack significant content.
+    Write in short phrases, no more than 20; output must be a single line:`;
+
+const NARRATIVE_PROMPT = `<player_name>{{player_name}}</player_name>
+    <prior_context>{{context_str}}</prior_context>
+    <passage_in_question>{{story_txt}}</passage_in_question>
+
+    Summarize only the necessary elements from passage_in_question to coherently continue prior_context. Second-person prose in the passage refers to {{player_name}}; include the player's name in the output.
+
+    Prioritize: character identities, interactions, dialogue tone, relationship dynamics, emotional beats, motivations, narrative themes and subtext; names, places, time references, plot developments, and unresolved goals or tensions. Retain atmosphere and sensory details when they are distinctive or show a change of state; omit generic atmosphere, generic prose, and repetition, including events already covered in prior_context.
+
+    When prior_context is empty, permit a larger initial summary so establishing identities, relationships, location, time, and unresolved goals are retained. Otherwise, write no more than 20 short phrases. Skip passages that are empty, unclear, or lack significant content. Keep the output compact and on a single line:`;
+
 const defaultSettings = Object.freeze({
     enabled: true,
     verbatimTurns: 10,
@@ -92,6 +117,9 @@ const defaultSettings = Object.freeze({
     maxLayers: 5,
     injectionTemplate: '\n\n<auto_injected_historical_context>\n[system guidance: this is a historical summary of messages that occurred prior to the oldest assistant message currently in context for this chat]\n{{summary}}\n</auto_injected_historical_context>\n\n',
 
+    contextBudget: 4096,
+    contextBudgetUnit: 'tokens',          // 'tokens' (estimated at 4 chars each) | 'characters'
+    injectionTemplate: '[Summary of past events: {{summary}}]',
     injectionPosition: 'in_prompt',        // 'in_prompt' | 'in_chat' | 'before_prompt'
     injectionDepth: 2,                    // Used only for in-chat injection. 0 = immediately before latest message.
     injectionRole: 'system',              // 'system' | 'user' | 'assistant'
@@ -120,6 +148,7 @@ Focus on: character interactions, dialogue tone, and relationship dynamics; emot
 Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
 
 Write in short phrases, no more than 20; output must be a single line:`,
+    summarizerUserPrompt: NARRATIVE_PROMPT,
 
     promptPreset: 'narrative',  // 'narrative' | 'gamestate' | 'custom'
     pauseSummarization: false,  // true = stop processing, keep injecting
@@ -192,6 +221,7 @@ const PROMPT_PRESETS = {
 Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context. If the passage_in_question has 2nd person point of view, 'you' pronoun in prose refers to the player. Use the player name in the final response instead of 'you'.
 
 IF prior_context has no content: include establishing details in the generated summary, extend the maximum number of short phrases up to 40.
+    narrative: NARRATIVE_PROMPT,
 
 Priority Elements: Time + location changes + narrative themes and subtext + sensory details that establish tone + atmosphere + mood + plot developments + proper names + character motivations + character interactions + dialogue tone + relationship dynamics + emotional beats + unresolved tensions.
 
@@ -380,26 +410,120 @@ function createEmptyChatStore() {
     };
 }
 
+const assembledContextCache = new WeakMap();
+
+function invalidateContextCache(store) {
+    if (store && typeof store === 'object') assembledContextCache.delete(store);
+}
+
+function snippetText(snippet) {
+    return typeof snippet === 'string' ? snippet : (snippet?.text || '');
+}
+
+function normalizeRecall(recall) {
+    if (!recall || typeof recall !== 'object') return undefined;
+    const list = value => [...new Set((Array.isArray(value) ? value : [])
+        .map(item => String(item).trim()).filter(Boolean))];
+    const normalized = {
+        entities: list(recall.entities),
+        unresolvedThreads: list(recall.unresolvedThreads),
+        durableFacts: list(recall.durableFacts),
+        currentLocation: typeof recall.currentLocation === 'string' ? recall.currentLocation.trim() : '',
+        currentTime: typeof recall.currentTime === 'string' ? recall.currentTime.trim() : '',
+        supersededFacts: list(recall.supersededFacts),
+    };
+    return Object.values(normalized).some(value => Array.isArray(value) ? value.length : value)
+        ? normalized : undefined;
+}
+
+function mergeRecallFields(snippets) {
+    const recalls = snippets.map(sn => normalizeRecall(sn?.recall)).filter(Boolean);
+    if (!recalls.length) return undefined;
+    const supersededFacts = [...new Set(recalls.flatMap(item => item.supersededFacts))];
+    const superseded = new Set(supersededFacts.map(item => item.toLocaleLowerCase()));
+    const uniqueActive = field => [...new Set(recalls.flatMap(item => item[field]))]
+        .filter(item => !superseded.has(item.toLocaleLowerCase()));
+    return normalizeRecall({
+        entities: uniqueActive('entities'),
+        unresolvedThreads: uniqueActive('unresolvedThreads'),
+        durableFacts: uniqueActive('durableFacts'),
+        currentLocation: recalls.findLast(item => item.currentLocation)?.currentLocation || '',
+        currentTime: recalls.findLast(item => item.currentTime)?.currentTime || '',
+        supersededFacts,
+    });
+}
+
 function normalizeChatStore(store) {
     if (!store || typeof store !== 'object') store = createEmptyChatStore();
     if (!Array.isArray(store.layers)) store.layers = [];
+    // Text-only exports remain valid; wrap strings without requiring structured recall data.
+    store.layers = store.layers.map(layer => Array.isArray(layer)
+        ? layer.map(snippet => typeof snippet === 'string' ? { text: snippet } : snippet)
+        : []);
     if (typeof store.summarizedUpTo !== 'number') store.summarizedUpTo = -1;
     if (!Array.isArray(store.ghostedIndices)) store.ghostedIndices = [];
+    const chatLength = SillyTavern.getContext()?.chat?.length;
+    store.ghostedIndices = [...new Set(store.ghostedIndices.filter(index =>
+        Number.isInteger(index)
+        && index >= 0
+        && (!Number.isInteger(chatLength) || index < chatLength)
+    ))].sort((a, b) => a - b);
     return store;
 }
 
+function getSummarizedRangeStart(store, endIndex = store.summarizedUpTo) {
+    const starts = (store.layers[0] || [])
+        .map(snippet => snippet?.turnRange?.[0])
+        .filter(index => Number.isInteger(index) && index >= 0 && index <= endIndex);
+    return starts.length > 0 ? Math.min(...starts) : 0;
+}
+
 function getCharacterMemoryKey() {
+function normalizeCardFilename(value) {
+    if (!value) return null;
+    const decoded = (() => {
+        try { return decodeURIComponent(String(value)); } catch { return String(value); }
+    })();
+    return decoded.replace(/\\/g, '/').split('/').pop().trim().toLowerCase() || null;
+}
+
+function getCurrentCharacterIdentity() {
     const ctx = SillyTavern.getContext();
-    const id = ctx.characterId ?? ctx.this_chid ?? ctx.chid;
-    if (id !== undefined && id !== null && id !== '') return `character:${id}`;
+    const id = ctx.characterId ?? ctx.this_chid ?? ctx.chid ?? null;
+    const character = ctx.character || (id !== null ? ctx.characters?.[id] : null) || {};
+    // Newer SillyTavern versions expose a persistent card id. Keep the list
+    // deliberately conservative: these fields identify the card, unlike chid.
+    const stableIdentifier = character.uuid
+        || character.character_uuid
+        || character.id
+        || character.data?.uuid
+        || character.data?.character_uuid
+        || character.data?.id
+        || character.data?.extensions?.sillytavern?.id
+        || null;
+    const avatarFilename = normalizeCardFilename(
+        character.avatar || character.data?.avatar || ctx.character?.avatar,
+    );
 
-    const candidate = ctx.character?.avatar
-        || ctx.character?.name
-        || ctx.characters?.[ctx.characterId]?.avatar
-        || ctx.characters?.[ctx.characterId]?.name
-        || ctx.name2;
+    return {
+        stableIdentifier: stableIdentifier ? String(stableIdentifier) : null,
+        avatarFilename,
+        characterName: character.name || ctx.name2 || 'Unknown character',
+        characterId: id,
+        formerKeys: [],
+        migrationStatus: 'current',
+    };
+}
 
-    return candidate ? `character:${candidate}` : 'character:unknown';
+function getCharacterMemoryKey() {
+    const identity = getCurrentCharacterIdentity();
+    if (identity.stableIdentifier) return `character:stable:${encodeURIComponent(identity.stableIdentifier)}`;
+    if (identity.avatarFilename) return `character:file:${encodeURIComponent(identity.avatarFilename)}`;
+
+    // chid is an array position and is only safe for the current ST session.
+    const id = identity.characterId;
+    if (id !== undefined && id !== null && id !== '') return `character:session:${id}`;
+    return 'character:unknown';
 }
 
 function getCharacterMemoryLabel() {
@@ -431,14 +555,72 @@ function getCurrentChatAttachmentInfo() {
         || chatId
         || 'Current chat';
 
+    const identity = getCurrentCharacterIdentity();
     return {
         chatId,
         chatName,
         characterId,
         characterName: ctx.character?.name || character?.name || ctx.name2 || 'Unknown character',
         characterAvatar: ctx.character?.avatar || character?.avatar || null,
+        stableIdentifier: identity.stableIdentifier,
+        avatarFilename: identity.avatarFilename,
         groupId,
         groupName: group?.name || null,
+    };
+}
+
+function attachmentsMatchActiveCard(attachment, identity) {
+    if (!attachment) return false;
+    if (identity.stableIdentifier && attachment.stableIdentifier) {
+        return String(attachment.stableIdentifier) === identity.stableIdentifier;
+    }
+    const savedAvatar = normalizeCardFilename(attachment.avatarFilename || attachment.characterAvatar);
+    if (identity.avatarFilename && savedAvatar) return savedAvatar === identity.avatarFilename;
+    return Boolean(attachment.characterName && identity.characterName
+        && attachment.characterName.trim().toLocaleLowerCase() === identity.characterName.trim().toLocaleLowerCase());
+}
+
+function migrateNumericCharacterBanks(memoryRoot, activeKey) {
+    const identity = getCurrentCharacterIdentity();
+    const candidates = Object.keys(memoryRoot.memories)
+        .filter(key => /^character:\d+$/.test(key))
+        .filter(key => attachmentsMatchActiveCard(memoryRoot.memoryAttachments[key], identity));
+    if (!candidates.length) return;
+
+    const targetOccupied = Boolean(memoryRoot.memories[activeKey]);
+    if (candidates.length !== 1 || targetOccupied) {
+        const warning = `Could not safely migrate ${candidates.join(', ')} to ${activeKey}; matching memory banks were preserved.`;
+        memoryRoot.migrationWarnings ||= [];
+        if (!memoryRoot.migrationWarnings.includes(warning)) memoryRoot.migrationWarnings.push(warning);
+        for (const key of candidates) {
+            memoryRoot.memoryIdentities[key] = {
+                ...identity,
+                formerKeys: [key],
+                migrationStatus: 'ambiguous-preserved',
+            };
+        }
+        if (!shownMigrationWarnings.has(warning)) {
+            toastr.warning(warning, 'Summaryception memory migration', { timeOut: 10000 });
+            shownMigrationWarnings.add(warning);
+        }
+        return;
+    }
+
+    const formerKey = candidates[0];
+    memoryRoot.memories[activeKey] = memoryRoot.memories[formerKey];
+    delete memoryRoot.memories[formerKey];
+    memoryRoot.memoryLabels[activeKey] = memoryRoot.memoryLabels[formerKey] || identity.characterName;
+    delete memoryRoot.memoryLabels[formerKey];
+    memoryRoot.memoryAttachments[activeKey] = {
+        ...memoryRoot.memoryAttachments[formerKey],
+        ...getCurrentChatAttachmentInfo(),
+    };
+    delete memoryRoot.memoryAttachments[formerKey];
+    delete memoryRoot.memoryIdentities[formerKey];
+    memoryRoot.memoryIdentities[activeKey] = {
+        ...identity,
+        formerKeys: [formerKey],
+        migrationStatus: 'migrated',
     };
 }
 
@@ -480,11 +662,14 @@ function getMemoryRoot() {
         });
 
         chatMetadata[MODULE_NAME] = {
-            version: 2,
+            version: 3,
             memoryMode: 'perCharacterCard',
             activeMemoryKey: activeKey,
             memories: {
                 [activeKey]: migratedStore,
+            },
+            memoryIdentities: {
+                [activeKey]: { ...getCurrentCharacterIdentity(), migrationStatus: 'legacy-store-migrated' },
             },
         };
     }
@@ -499,15 +684,36 @@ function getMemoryRoot() {
     if (!memoryRoot.memoryAttachments || typeof memoryRoot.memoryAttachments !== 'object') {
         memoryRoot.memoryAttachments = {};
     }
+    if (!memoryRoot.memoryIdentities || typeof memoryRoot.memoryIdentities !== 'object') {
+        memoryRoot.memoryIdentities = {};
+    }
+    for (const key of Object.keys(memoryRoot.memories)) {
+        if (memoryRoot.memoryIdentities[key]) continue;
+        const attachment = memoryRoot.memoryAttachments[key] || {};
+        memoryRoot.memoryIdentities[key] = {
+            stableIdentifier: attachment.stableIdentifier ? String(attachment.stableIdentifier) : null,
+            avatarFilename: normalizeCardFilename(attachment.avatarFilename || attachment.characterAvatar),
+            characterName: attachment.characterName || memoryRoot.memoryLabels[key] || 'Unknown character',
+            formerKeys: /^character:\d+$/.test(key) ? [key] : [],
+            migrationStatus: /^character:\d+$/.test(key) ? 'legacy-unmatched' : 'existing',
+        };
+    }
+    migrateNumericCharacterBanks(memoryRoot, activeKey);
     if (!memoryRoot.memories[activeKey]) {
         memoryRoot.memories[activeKey] = createEmptyChatStore();
     }
 
-    memoryRoot.version = 2;
+    memoryRoot.version = 3;
     memoryRoot.memoryMode = 'perCharacterCard';
     memoryRoot.activeMemoryKey = activeKey;
     memoryRoot.memoryLabels[activeKey] = getCharacterMemoryLabel();
     memoryRoot.memoryAttachments[activeKey] = getCurrentChatAttachmentInfo();
+    const previousIdentity = memoryRoot.memoryIdentities[activeKey] || {};
+    memoryRoot.memoryIdentities[activeKey] = {
+        ...getCurrentCharacterIdentity(),
+        formerKeys: Array.isArray(previousIdentity.formerKeys) ? previousIdentity.formerKeys : [],
+        migrationStatus: previousIdentity.migrationStatus || 'current',
+    };
 
     return normalizeChatStore(memoryRoot.memories[activeKey]);
 }
@@ -542,6 +748,9 @@ function getAllMemoryStores() {
         addEntry(key, root?.memories?.[key]);
     }
     for (const key of Object.keys(root?.memoryAttachments || {})) {
+        addEntry(key, root?.memories?.[key]);
+    }
+    for (const key of Object.keys(root?.memoryIdentities || {})) {
         addEntry(key, root?.memories?.[key]);
     }
 
@@ -621,7 +830,7 @@ async function activateCharacterMemoryStore() {
 
     const store = getChatStore();
     if (store.summarizedUpTo >= 0) {
-        await ghostMessagesUpTo(store.summarizedUpTo);
+        await ghostMessagesUpTo(store.summarizedUpTo, getSummarizedRangeStart(store));
     }
 }
 
@@ -641,6 +850,7 @@ async function repairGhostingForRange(startIdx, endIdx) {
 
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
+    const ghostedIndices = new Set(store.ghostedIndices);
     let repaired = 0;
     let skipped = 0;
 
@@ -678,9 +888,7 @@ async function repairGhostingForRange(startIdx, endIdx) {
         m.extra = m.extra || {};
         m.extra.sc_ghosted = true;
 
-        if (!store.ghostedIndices.includes(i)) {
-            store.ghostedIndices.push(i);
-        }
+        ghostedIndices.add(i);
 
         try {
             await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false });
@@ -690,6 +898,7 @@ async function repairGhostingForRange(startIdx, endIdx) {
         }
     }
 
+    store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
     trace('  Repaired:', repaired, 'Skipped:', skipped);
     await saveChatStore();
     trace('<<< EXITING repairGhostingForRange');
@@ -707,9 +916,9 @@ async function ghostMessage(messageIndex) {
 
     // Track that WE ghosted this message
     const store = getChatStore();
-    if (!store.ghostedIndices.includes(messageIndex)) {
-        store.ghostedIndices.push(messageIndex);
-    }
+    const ghostedIndices = new Set(store.ghostedIndices);
+    ghostedIndices.add(messageIndex);
+    store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
 
     try {
         await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${messageIndex}`, { showOutput: false });
@@ -805,6 +1014,20 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0) {
         if (msg.is_hidden) {
             log(`Skipping message ${i} — already hidden by user`);
             continue;
+    const boundedStart = Math.max(0, Math.min(Number.isInteger(startIndex) ? startIndex : 0, chat.length));
+    const boundedEnd = Math.min(Number.isInteger(endIndex) ? endIndex : -1, chat.length - 1);
+    if (boundedStart > boundedEnd) return;
+
+    const rangeLength = boundedEnd - boundedStart + 1;
+    const ghostedIndices = new Set(store.ghostedIndices);
+
+    const progressToast = toastr.info(
+        `Hiding messages: 0 / ${rangeLength}`,
+        'Summaryception — Ghosting',
+        {
+            timeOut: 0,
+            extendedTimeOut: 0,
+            tapToDismiss: false,
         }
 
         msg.extra.sc_ghosted = true;
@@ -827,6 +1050,40 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0) {
         } catch (e) {
             console.error(LOG_PREFIX, `Failed to hide range ${rangeStart}-${rangeEnd}:`, e);
         }
+    let examined = 0;
+    try {
+        for (let i = boundedStart; i <= boundedEnd; i++) {
+            const msg = chat[i];
+            if (msg && !(msg.is_system && !msg.extra?.sc_ghosted)) {
+                if (!msg.extra) msg.extra = {};
+                if (!msg.extra.sc_ghosted) {
+                    // Do not claim ownership of a message hidden by the user.
+                    if (msg.is_hidden) {
+                        log(`Skipping message ${i} — already hidden by user`);
+                    } else {
+                        msg.extra.sc_ghosted = true;
+                        ghostedIndices.add(i);
+
+                        // SillyTavern does not advertise these commands as safely batchable.
+                        await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false })
+                            .catch(e => log(`Failed to hide message ${i}:`, e));
+                    }
+                }
+            }
+
+            examined++;
+            if (examined % 10 === 0 || i === boundedEnd) {
+                const pct = Math.round((examined / rangeLength) * 100);
+                $(progressToast).find('.toast-message').text(
+                    `Hiding messages: ${examined} / ${rangeLength} (${pct}%)`
+                );
+            }
+        }
+
+        log(`Ghosted messages from index ${boundedStart} to ${boundedEnd}`);
+    } finally {
+        store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
+        clearPersistentToast(progressToast);
     }
 
     log(`Ghosted messages ${rangeStart}–${rangeEnd} (${newlyGhosted} newly marked)${s.disableGhosting ? ' (hiding disabled — metadata only)' : ''}`);
@@ -861,6 +1118,7 @@ async function repairIfBranched() {
                 return snippet.turnRange[1] < chatLength;
             });
             removedSnippets = before - store.layers[0].length;
+            if (removedSnippets > 0) invalidateContextCache(store);
         }
 
         store.ghostedIndices = store.ghostedIndices.filter(idx => idx < chatLength);
@@ -952,19 +1210,63 @@ function buildPassageFromRange(chat, startIdx, endIdx) {
  * @param {number} downToLayer - Include this layer and all layers above it
  * @returns {string} - Combined context string, or '(none yet)'
  */
+function getContextBudgetCharacters(settings = getSettings()) {
+    const amount = Math.max(1, Number(settings.contextBudget) || defaultSettings.contextBudget);
+    return Math.floor(amount * (settings.contextBudgetUnit === 'characters' ? 1 : 4));
+}
+
+function fitContextParts(parts, budget) {
+    const accepted = [];
+    let remaining = budget;
+    for (const part of parts) {
+        const text = String(part.text || '').trim();
+        if (!text) continue;
+        const separator = accepted.length ? 1 : 0;
+        if (text.length + separator > remaining) {
+            if (accepted.length === 0 && remaining > 0) {
+                accepted.push({ ...part, text: text.slice(0, remaining) });
+            }
+            break;
+        }
+        accepted.push(part);
+        remaining -= text.length + separator;
+    }
+    return accepted;
+}
+
 function buildFullContext(downToLayer = 0) {
     const store = getChatStore();
-    const parts = [];
+    const budget = getContextBudgetCharacters();
+    const cacheKey = `${downToLayer}:${budget}`;
+    const cached = assembledContextCache.get(store);
+    if (cached?.has(cacheKey)) return cached.get(cacheKey);
 
+    let deepest = -1;
     for (let i = store.layers.length - 1; i >= downToLayer; i--) {
-        const layer = store.layers[i];
-        if (!layer || layer.length === 0) continue;
-        for (const sn of layer) {
-            parts.push(sn.text);
-        }
+        if (store.layers[i]?.length) { deepest = i; break; }
     }
 
-    return parts.length > 0 ? parts.join(' ') : '(none yet)';
+    // The deepest layer is canonical history. Fill remaining space with the newest
+    // lower-layer (not-yet-promoted) snippets, but emit each group chronologically.
+    const candidates = [];
+    if (deepest >= 0) {
+        for (const sn of store.layers[deepest]) candidates.push({ text: snippetText(sn) });
+        for (let i = deepest - 1; i >= downToLayer; i--) {
+            const layer = store.layers[i] || [];
+            for (let j = layer.length - 1; j >= 0; j--) {
+                candidates.push({ text: snippetText(layer[j]), recent: true, layer: i, order: j });
+            }
+        }
+    }
+    const selected = fitContextParts(candidates, budget);
+    const canonical = selected.filter(part => !part.recent);
+    const recent = selected.filter(part => part.recent)
+        .sort((a, b) => b.layer - a.layer || a.order - b.order);
+    const result = [...canonical, ...recent].map(part => part.text).join(' ') || '(none yet)';
+    const bankCache = cached || new Map();
+    bankCache.set(cacheKey, result);
+    assembledContextCache.set(store, bankCache);
+    return result;
 }
 
 // ─── Prompt Toggle Management ────────────────────────────────────────
@@ -1098,7 +1400,7 @@ function abortSummarization() {
 
 // ─── Core: LLM Summarization with Retry ──────────────────────────────
 
-async function callSummarizer(storyTxt, contextStr) {
+async function callSummarizer(storyTxt, contextStr, extraInstructions = '') {
     trace('>>> ENTERING callSummarizer');
     trace('  storyTxt length:', storyTxt?.length ?? 'UNDEFINED');
     trace('  contextStr length:', contextStr?.length ?? 'UNDEFINED');
@@ -1112,7 +1414,8 @@ async function callSummarizer(storyTxt, contextStr) {
     const prompt = s.summarizerUserPrompt
         .replace('{{player_name}}', getPlayerName())
         .replace('{{context_str}}', contextStr || '(none yet)')
-        .replace('{{story_txt}}', storyTxt);
+        .replace('{{story_txt}}', storyTxt)
+        + (extraInstructions ? `\n\n${extraInstructions}` : '');
 
     log('── Summarizer Call ──');
     log('Context str length:', contextStr.length, 'chars');
@@ -1390,6 +1693,7 @@ async function summarizeOneBatch(visibleTurns) {
             turnRange: [passageStart, endIdx],
             timestamp: Date.now(),
         });
+        invalidateContextCache(store);
 
         store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
         await ghostMessagesUpTo(endIdx, passageStart);
@@ -1417,6 +1721,11 @@ async function summarizeOneBatch(visibleTurns) {
 
 // ─── Core: Inner Batch for Catchup ───────────────────────────────────
 
+const CATCHUP_BATCH_RESULT = Object.freeze({
+    EMPTY_SKIP: 'EMPTY_SKIP',
+    NO_ELIGIBLE: 'NO_ELIGIBLE',
+});
+
 async function summarizeOneBatchFromTurns(visibleTurns) {
     trace('>>> ENTERING summarizeOneBatchFromTurns');
     trace('  visibleTurns:', visibleTurns?.length ?? 'UNDEFINED');
@@ -1440,9 +1749,11 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         return false;
     }
 
+    const eligibleTurns = visibleTurns.filter(turn => turn.index > store.summarizedUpTo);
     const batchSize = Math.min(s.turnsPerSummary, eligibleTurns.length);
     const batch = eligibleTurns.slice(0, batchSize);
 
+    trace('  eligibleTurns:', eligibleTurns.length);
     trace('  batchSize:', batchSize);
     trace('  batch prepared:', batch.length);
 
@@ -1461,8 +1772,21 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
 
     // ─── Start from the message AFTER the last summarized one ───
     const passageStart = store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1;
+    try {
+        if (batch.length === 0) {
+            const summarizedVisibleTurns = visibleTurns.filter(turn => turn.index <= store.summarizedUpTo);
+            trace('  No eligible turns; re-ghosting summarized visible turns:', summarizedVisibleTurns.length);
+            for (const turn of summarizedVisibleTurns) {
+                await ghostMessage(turn.index);
+            }
+            await saveChatStore();
+            trace('<<< EXITING summarizeOneBatchFromTurns - NO_ELIGIBLE');
+            return CATCHUP_BATCH_RESULT.NO_ELIGIBLE;
+        }
 
-    trace('  passageStart:', passageStart, 'endIdx:', endIdx);
+        const startIdx = batch[0].index;
+        const endIdx = batch[batch.length - 1].index;
+        const passageStart = startIdx;
 
     // ─── SANITY CHECK: passageStart should always be <= endIdx ───
     if (passageStart > endIdx) {
@@ -1471,10 +1795,13 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         trace('<<< EXITING - passageStart > endIdx');
         return 'EMPTY_SKIP';
     }
+        trace('  startIdx:', startIdx, 'endIdx:', endIdx);
+        trace('  store.summarizedUpTo:', store.summarizedUpTo);
+        trace('  passageStart:', passageStart, 'endIdx:', endIdx);
 
-    trace('  About to call buildPassageFromRange...');
+        if (!store.layers[0]) store.layers[0] = [];
 
-    try {
+        trace('  About to call buildPassageFromRange...');
         const storyTxt = buildPassageFromRange(chat, passageStart, endIdx);
         trace('  buildPassageFromRange returned, length:', storyTxt?.length ?? 'UNDEFINED');
 
@@ -1487,6 +1814,11 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
             await saveChatStore();
 
             return 'EMPTY_SKIP';
+            store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
+            await saveChatStore();
+            trace('  Empty passage skipped; summarizedUpTo advanced to:', store.summarizedUpTo);
+            trace('<<< EXITING summarizeOneBatchFromTurns - EMPTY_SKIP');
+            return CATCHUP_BATCH_RESULT.EMPTY_SKIP;
         }
 
         trace('  About to call buildFullContext...');
@@ -1508,6 +1840,7 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
             turnRange: [passageStart, endIdx],
             timestamp: Date.now(),
         });
+        invalidateContextCache(store);
 
         store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
         trace('  Updated store.summarizedUpTo to:', store.summarizedUpTo);
@@ -1599,6 +1932,13 @@ async function runCatchup(visibleTurns, overflow) {
             } else if (result === 'EMPTY_SKIP') {
                 trace('  >>> summarizeOneBatchFromTurns returned EMPTY_SKIP');
                 completed++;
+                consecutiveFailures = 0;
+            } else if (result === CATCHUP_BATCH_RESULT.EMPTY_SKIP) {
+                trace('  >>> summarizeOneBatchFromTurns returned EMPTY_SKIP');
+                completed++;
+                consecutiveFailures = 0;
+            } else if (result === CATCHUP_BATCH_RESULT.NO_ELIGIBLE) {
+                trace('  >>> summarizeOneBatchFromTurns returned NO_ELIGIBLE');
                 consecutiveFailures = 0;
             } else {
                 trace('  >>> summarizeOneBatchFromTurns returned FAILURE');
@@ -1736,6 +2076,7 @@ async function maybePromoteLayer(layerIndex) {
         seed.promoted = true;
         seed.seedFromLayer = layerIndex;
         destLayer.push(seed);
+        invalidateContextCache(store);
 
         log(`Seeded Layer ${layerIndex + 1} with oldest snippet from Layer ${layerIndex} (no LLM call)`);
 
@@ -1755,7 +2096,8 @@ async function maybePromoteLayer(layerIndex) {
     }
 
     const toMerge = layer.splice(0, s.snippetsPerPromotion);
-    const storyTxt = toMerge.map(sn => sn.text).join(' ');
+    invalidateContextCache(store);
+    const storyTxt = toMerge.map(snippetText).join(' ');
     const contextStr = buildFullContext(layerIndex + 1);
 
     toastr.info(
@@ -1764,18 +2106,24 @@ async function maybePromoteLayer(layerIndex) {
         { timeOut: 3000, progressBar: true }
     );
 
-    const metaSummary = await callSummarizer(storyTxt, contextStr);
+    const promotionInstructions = `This is a memory promotion. Preserve every unresolved thread and durable fact. Merge repeated facts into one concise statement. When newer information conflicts with older information, explicitly replace the obsolete state instead of appending both versions. Preserve current location/time and named entities.`;
+    const metaSummary = await callSummarizer(storyTxt, contextStr, promotionInstructions);
     if (!metaSummary) {
         layer.unshift(...toMerge);
+        invalidateContextCache(store);
         return;
     }
+
+    const mergedRecall = mergeRecallFields(toMerge);
 
     destLayer.push({
         text: metaSummary,
         fromLayer: layerIndex,
         mergedCount: toMerge.length,
         timestamp: Date.now(),
+        ...(mergedRecall ? { recall: mergedRecall } : {}),
     });
+    invalidateContextCache(store);
 
     log(`Layer ${layerIndex + 1} now has ${destLayer.length} snippets`);
 
@@ -1801,19 +2149,38 @@ function assembleSummaryBlock() {
         const layer = store.layers[i];
         if (!layer || layer.length === 0) continue;
         for (const sn of layer) {
-            snippets.push(sn.text);
+            snippets.push(sn);
         }
     }
 
     if (store.layers[0] && store.layers[0].length > 0) {
         for (const sn of store.layers[0]) {
-            snippets.push(sn.text);
+            snippets.push(sn);
         }
     }
 
     if (snippets.length === 0) return '';
 
-    const combinedSummary = snippets.join(' ').trim();
+    const recall = mergeRecallFields(snippets);
+    const priorityParts = [];
+    if (recall?.unresolvedThreads.length) priorityParts.push(`Unresolved: ${recall.unresolvedThreads.join('; ')}`);
+    if (recall?.currentLocation || recall?.currentTime) {
+        priorityParts.push(`Current state: ${[
+            recall.currentLocation && `location=${recall.currentLocation}`,
+            recall.currentTime && `time=${recall.currentTime}`,
+        ].filter(Boolean).join(', ')}`);
+    }
+    if (recall?.durableFacts.length) priorityParts.push(`Durable facts: ${recall.durableFacts.join('; ')}`);
+    if (recall?.entities.length) priorityParts.push(`Entities: ${recall.entities.join('; ')}`);
+
+    const budget = getContextBudgetCharacters(s);
+    const prioritized = fitContextParts(priorityParts.map(text => ({ text })), budget);
+    const used = prioritized.reduce((sum, part, index) => sum + part.text.length + (index ? 1 : 0), 0);
+    const chronology = fitContextParts(
+        snippets.map(sn => ({ text: snippetText(sn) })),
+        Math.max(0, budget - used - (prioritized.length ? 1 : 0)),
+    );
+    const combinedSummary = [...prioritized, ...chronology].map(part => part.text).join(' ').trim();
     const template = (s.injectionTemplate || defaultSettings.injectionTemplate).trim();
 
     if (template.includes('{{summary}}')) {
@@ -1994,6 +2361,7 @@ function registerSlashCommands() {
 
                 const store = getChatStore();
                 store.layers.length = 0;
+                invalidateContextCache(store);
                 store.summarizedUpTo = -1;
                 store.ghostedIndices = [];
 
@@ -2064,6 +2432,8 @@ function updateUI() {
         $('#sc_snippets_per_promotion_val').text(s.snippetsPerPromotion);
         $('#sc_max_layers').val(s.maxLayers);
         $('#sc_max_layers_val').text(s.maxLayers);
+        $('#sc_context_budget').val(s.contextBudget);
+        $('#sc_context_budget_unit').val(s.contextBudgetUnit);
         $('#sc_injection_template').val(s.injectionTemplate);
         $('#sc_injection_position').val(s.injectionPosition || defaultSettings.injectionPosition);
         $('#sc_injection_depth').val(getInjectionDepthValue(s));
@@ -2071,16 +2441,14 @@ function updateUI() {
         $('#sc_injection_role').val(s.injectionRole || defaultSettings.injectionRole);
         $('#sc_injection_scan').prop('checked', Boolean(s.injectionScan));
         $('#sc_summarizer_system_prompt').val(s.summarizerSystemPrompt);
-        $('#sc_summarizer_user_prompt').val(s.summarizerUserPrompt);
         // ── Prompt preset migration & sync ──
-        // Migration: existing users with the old game-state default get upgraded to narrative.
-        // Users who customized their prompt get marked as 'custom'.
+        // Upgrade only exact prior built-ins. Never replace user-authored text.
         if (!s.promptPreset) {
             const currentPrompt = (s.summarizerUserPrompt || '').trim();
             const gameStatePrompt = PROMPT_PRESETS.gamestate.trim();
+            const previousNarrativePrompt = PREVIOUS_NARRATIVE_PROMPT.trim();
 
-            if (!currentPrompt || currentPrompt === gameStatePrompt) {
-                // User had the old default — upgrade to narrative
+            if (!currentPrompt || currentPrompt === gameStatePrompt || currentPrompt === previousNarrativePrompt) {
                 s.promptPreset = 'narrative';
                 s.summarizerUserPrompt = PROMPT_PRESETS.narrative;
                 saveSettings();
@@ -2089,8 +2457,14 @@ function updateUI() {
                 s.promptPreset = 'custom';
                 saveSettings();
             }
+        } else if (s.promptPreset === 'narrative'
+            && (s.summarizerUserPrompt || '').trim() === PREVIOUS_NARRATIVE_PROMPT.trim()) {
+            // The preset field already existed when this built-in prompt changed.
+            s.summarizerUserPrompt = PROMPT_PRESETS.narrative;
+            saveSettings();
         }
 
+        $('#sc_summarizer_user_prompt').val(s.summarizerUserPrompt);
         $('#sc_prompt_preset').val(s.promptPreset);
         $('#sc_debug_mode').prop('checked', s.debugMode);
         $('#sc_trace_mode').prop('checked', s.traceMode);
@@ -2166,6 +2540,7 @@ function updateInjectionInspector(preview = assembleSummaryBlock()) {
 function getMemoryBankLabel(key) {
     const { chatMetadata } = SillyTavern.getContext();
     const root = chatMetadata[MODULE_NAME];
+    if (root?.memoryIdentities?.[key]?.characterName) return root.memoryIdentities[key].characterName;
     if (root?.memoryLabels?.[key]) return root.memoryLabels[key];
     if (root?.memoryAttachments?.[key]?.characterName) return root.memoryAttachments[key].characterName;
     if (key === getCharacterMemoryKey()) return getCharacterMemoryLabel();
@@ -2182,12 +2557,22 @@ function getMemoryBankAttachment(key) {
         return {
             ...currentAttachment,
             characterName: 'All characters in this chat',
+            stableIdentifier: null,
+            avatarFilename: null,
+            formerKeys: [],
+            migrationStatus: 'shared',
         };
     }
 
+    const identity = root?.memoryIdentities?.[key] || {};
+    const isActive = key === getCharacterMemoryKey();
     return {
-        ...currentAttachment,
+        ...(isActive ? currentAttachment : {}),
         ...(root?.memoryAttachments?.[key] || {}),
+        stableIdentifier: identity.stableIdentifier || root?.memoryAttachments?.[key]?.stableIdentifier || null,
+        avatarFilename: identity.avatarFilename || normalizeCardFilename(root?.memoryAttachments?.[key]?.characterAvatar),
+        formerKeys: Array.isArray(identity.formerKeys) ? identity.formerKeys : [],
+        migrationStatus: identity.migrationStatus || 'unmigrated',
         characterName: getMemoryBankLabel(key),
     };
 }
@@ -2221,6 +2606,10 @@ function getMemoryDatabaseSnapshot() {
             characterId: attachment.characterId,
             characterName: attachment.characterName,
             characterAvatar: attachment.characterAvatar,
+            stableIdentifier: attachment.stableIdentifier,
+            avatarFilename: attachment.avatarFilename,
+            formerKeys: attachment.formerKeys,
+            migrationStatus: attachment.migrationStatus,
             groupId: attachment.groupId,
             groupName: attachment.groupName,
             summarizedUpTo: store.summarizedUpTo ?? -1,
@@ -2238,6 +2627,7 @@ function getMemoryDatabaseSnapshot() {
         activeKey,
         activeLabel: getMemoryBankLabel(activeKey),
         bankCount: banks.length,
+        migrationWarnings: [...(root?.migrationWarnings || [])],
         banks,
     };
 }
@@ -2247,7 +2637,10 @@ function buildMemoryDatabaseHtml(snapshot) {
         return '<div class="sc-muted">No memory banks found.</div>';
     }
 
-    return snapshot.banks.map((bank) => {
+    const warningsHtml = snapshot.migrationWarnings?.length
+        ? `<div class="sc-db-migration-warning">⚠️ ${snapshot.migrationWarnings.map(escapeHtml).join('<br>')}</div>`
+        : '';
+    return warningsHtml + snapshot.banks.map((bank) => {
         const layerHtml = bank.layers
             .filter(layer => layer.snippets.length > 0)
             .map(layer => {
@@ -2285,6 +2678,10 @@ function buildMemoryDatabaseHtml(snapshot) {
 
         const attachmentRows = [
             ['Character', bank.characterName || 'Unknown character'],
+            bank.stableIdentifier ? ['Stable card ID', bank.stableIdentifier] : null,
+            bank.avatarFilename ? ['Card/avatar file', bank.avatarFilename] : null,
+            ['Migration', bank.migrationStatus],
+            bank.formerKeys?.length ? ['Former keys', bank.formerKeys.join(', ')] : null,
             ['Chat', bank.chatName || 'Current chat'],
             bank.chatId !== null && bank.chatId !== undefined ? ['Chat ID/file', bank.chatId] : null,
             bank.characterId !== null && bank.characterId !== undefined ? ['Character ID', bank.characterId] : null,
@@ -2297,6 +2694,9 @@ function buildMemoryDatabaseHtml(snapshot) {
                 <strong>${escapeHtml(String(value))}</strong>
             </div>`).join('');
 
+        const migrationWarning = bank.migrationStatus === 'ambiguous-preserved'
+            ? '<div class="sc-db-migration-warning">⚠️ Ambiguous identity match; this bank was preserved and not merged.</div>'
+            : '';
         return `
         <details class="sc-db-bank" ${bank.active ? 'open' : ''} data-bank-key="${escapeHtml(bank.key)}">
             <summary>
@@ -2304,6 +2704,7 @@ function buildMemoryDatabaseHtml(snapshot) {
                 <span class="sc-db-bank-meta">${bank.snippetCount} snippets · ${bank.ghostedIndices.length} ghosted · up to ${bank.summarizedUpTo}</span>
             </summary>
             <div class="sc-db-bank-key">Memory key: ${escapeHtml(bank.key)}</div>
+            ${migrationWarning}
             <div class="sc-db-bank-actions">
                 <button class="menu_button sc-db-bank-export-btn" type="button" data-bank-key="${escapeHtml(bank.key)}">
                     <i class="fa-solid fa-file-export"></i> Export Bank
@@ -2435,6 +2836,7 @@ function showMemoryDatabaseModal() {
             snippet.text = newText;
             snippet.edited = true;
             snippet.editedAt = new Date().toISOString();
+            invalidateContextCache(getMemoryStoreByKey(bankKey));
             await persistMemoryDatabaseChange();
             refreshDatabaseView();
             toastr.success(`Memory updated in Layer ${layerIndex}.`, 'Summaryception', { timeOut: 2000 });
@@ -2459,6 +2861,7 @@ function showMemoryDatabaseModal() {
             }
 
             layer.splice(snippetIndex, 1);
+            invalidateContextCache(store);
             recalculateSummarizedUpTo(store);
             await persistMemoryDatabaseChange();
             refreshDatabaseView();
@@ -2592,6 +2995,7 @@ function updateSnippetBrowser() {
                     const newText = $(this).val().trim();
                     if (newText) {
                         sn.text = newText;
+                        invalidateContextCache(store);
                         await saveChatStore();
                         updateInjection();
                         toastr.success('Snippet updated', 'Summaryception', { timeOut: 1500 });
@@ -2605,6 +3009,7 @@ function updateSnippetBrowser() {
                 const newText = $(this).val().trim();
                 if (newText && newText !== sn.text) {
                     sn.text = newText;
+                    invalidateContextCache(store);
                     await saveChatStore();
                     updateInjection();
                     toastr.success('Snippet updated', 'Summaryception', { timeOut: 1500 });
@@ -2688,6 +3093,7 @@ function updateSnippetBrowser() {
             sn.text = newSummary;
             sn.timestamp = Date.now();
             sn.regenerated = true;
+            invalidateContextCache(store);
 
             await saveChatStore();
             updateInjection();
@@ -2708,6 +3114,7 @@ function updateSnippetBrowser() {
         const layer = store.layers[layerIdx];
         if (layer) {
             layer.splice(snippetIdx, 1);
+            invalidateContextCache(store);
 
             if (store.layers[0] && store.layers[0].length > 0) {
                 const maxEnd = Math.max(...store.layers[0]
@@ -2783,6 +3190,18 @@ function bindUIEvents() {
     $('#sc_summarizer_response_length').on('input', function () {
         getSettings().summarizerResponseLength = parseInt($(this).val(), 10) || 0;
         saveSettings();
+    });
+
+    $('#sc_context_budget').on('change', function () {
+        getSettings().contextBudget = Math.max(1, parseInt($(this).val(), 10) || defaultSettings.contextBudget);
+        saveSettings();
+        updateInjection();
+    });
+
+    $('#sc_context_budget_unit').on('change', function () {
+        getSettings().contextBudgetUnit = $(this).val() === 'characters' ? 'characters' : 'tokens';
+        saveSettings();
+        updateInjection();
     });
 
     $('#sc_strip_patterns').on('change', function () {
@@ -2945,6 +3364,7 @@ function bindUIEvents() {
         await unghostAllMessages();
         const store = getChatStore();
         store.layers.length = 0;
+        invalidateContextCache(store);
         store.summarizedUpTo = -1;
         store.ghostedIndices = [];
         await saveChatStore();
@@ -3022,7 +3442,10 @@ function bindUIEvents() {
                     { timeOut: 3000 }
                 );
 
-                const repaired = await repairGhostingForRange(0, store.summarizedUpTo);
+                const repaired = await repairGhostingForRange(
+                    getSummarizedRangeStart(store),
+                    store.summarizedUpTo
+                );
                 trace('  Repaired ' + repaired + ' messages');
                 toastr.info(
                     `Repaired ghosting for ${repaired} messages.`,
@@ -3110,7 +3533,15 @@ function bindUIEvents() {
 
     $('#sc_export').on('click', function () {
         const store = getChatStore();
-        const blob = new Blob([JSON.stringify(store, null, 2)], { type: 'application/json' });
+        const key = getSettings().separateMemoryByCharacterCard ? getCharacterMemoryKey() : 'chat';
+        const exportedBank = {
+            format: 'summaryception-memory-bank-v3',
+            key,
+            label: getMemoryBankLabel(key),
+            attachment: getMemoryBankAttachment(key),
+            store,
+        };
+        const blob = new Blob([JSON.stringify(exportedBank, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -3130,7 +3561,8 @@ function bindUIEvents() {
             try {
                 const text = await file.text();
                 const data = JSON.parse(text);
-                if (!data.layers || !Array.isArray(data.layers)) {
+                const importedStore = data.store || data;
+                if (!importedStore.layers || !Array.isArray(importedStore.layers)) {
                     toastr.error('Invalid file format.');
                     return;
                 }
@@ -3143,9 +3575,14 @@ function bindUIEvents() {
                 store.layers = data.layers;
                 store.summarizedUpTo = data.summarizedUpTo ?? -1;
                 store.ghostedIndices = data.ghostedIndices || [];
+                normalizeChatStore(store);
+                invalidateContextCache(store);
+                store.layers = importedStore.layers;
+                store.summarizedUpTo = importedStore.summarizedUpTo ?? -1;
+                store.ghostedIndices = importedStore.ghostedIndices || [];
 
                 if (store.summarizedUpTo >= 0) {
-                    await ghostMessagesUpTo(store.summarizedUpTo);
+                    await ghostMessagesUpTo(store.summarizedUpTo, getSummarizedRangeStart(store));
                 }
 
                 await saveChatStore();
