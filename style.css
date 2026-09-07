@@ -657,3 +657,9 @@
 .sc-db-snippet-delete-btn {
     color: #ff6b6b;
 }
+.sc-db-migration-warning {
+    margin: 0.5rem 0;
+    padding: 0.5rem 0.75rem;
+    border-left: 3px solid var(--SmartThemeQuoteColor, #e0a000);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #e0a000) 12%, transparent);
+}
