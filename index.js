@@ -1,5 +1,5 @@
 /**
- * Summaryception v5.5.4 — Layered Recursive Summarization for SillyTavern
+ * Summaryception v5.5.5 — Layered Recursive Summarization for SillyTavern
  *
  * NON-DESTRUCTIVE: Uses SillyTavern's native /hide and /unhide commands
  * to exclude summarized messages from LLM context while keeping them
@@ -19,7 +19,7 @@ import {
 
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
-const EXTENSION_VERSION = '5.5.4';
+const EXTENSION_VERSION = '5.5.5';
 const shownMigrationWarnings = new Set();
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -115,11 +115,9 @@ const defaultSettings = Object.freeze({
     snippetsPerLayer: 30,
     snippetsPerPromotion: 3,
     maxLayers: 5,
-    injectionTemplate: '\n\n<auto_injected_historical_context>\n[system guidance: this is a historical summary of messages that occurred prior to the oldest assistant message currently in context for this chat]\n{{summary}}\n</auto_injected_historical_context>\n\n',
-
     contextBudget: 4096,
     contextBudgetUnit: 'tokens',          // 'tokens' (estimated at 4 chars each) | 'characters'
-    injectionTemplate: '[Summary of past events: {{summary}}]',
+    injectionTemplate: '\n\n<auto_injected_historical_context>\n[system guidance: this is a historical summary of messages that occurred prior to the oldest assistant message currently in context for this chat]\n{{summary}}\n</auto_injected_historical_context>\n\n',
     injectionPosition: 'in_prompt',        // 'in_prompt' | 'in_chat' | 'before_prompt'
     injectionDepth: 2,                    // Used only for in-chat injection. 0 = immediately before latest message.
     injectionRole: 'system',              // 'system' | 'user' | 'assistant'
@@ -128,26 +126,6 @@ const defaultSettings = Object.freeze({
     summarizerSystemPrompt:
         'Role: precise narrative-state tracker. Output only the summary line — no preamble, no commentary, no markdown.',
 
-    summarizerUserPrompt:
-        `<player_name>
-{{player_name}}
-</player_name>
-
-<prior_context>
-{{context_str}}
-</prior_context>
-
-<passage_in_question>
-{{story_txt}}
-</passage_in_question>
-
-Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context. If the passage_in_question has 2nd person point of view, 'you' pronoun in prose refers to the player. Use the player name in the summary output instead of 'you'.
-
-Focus on: character interactions, dialogue tone, and relationship dynamics; emotional beats and character motivations; atmosphere, mood, and sensory details that establish tone; narrative themes and subtext; names, location changes, and time; plot developments and unresolved tensions; details that distinguish this moment from any other.
-
-Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
-
-Write in short phrases, no more than 20; output must be a single line:`,
     summarizerUserPrompt: NARRATIVE_PROMPT,
 
     promptPreset: 'narrative',  // 'narrative' | 'gamestate' | 'custom'
@@ -206,28 +184,7 @@ Write in short phrases, no more than 20; output must be a single line:`,
 // ─── Prompt Presets ──────────────────────────────────────────────────
 
 const PROMPT_PRESETS = {
-    narrative: `<player_name>
-{{player_name}}
-</player_name>
-
-<prior_context>
-{{context_str}}
-</prior_context>
-
-<passage_in_question>
-{{story_txt}}
-</passage_in_question>
-
-Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context. If the passage_in_question has 2nd person point of view, 'you' pronoun in prose refers to the player. Use the player name in the final response instead of 'you'.
-
-IF prior_context has no content: include establishing details in the generated summary, extend the maximum number of short phrases up to 40.
     narrative: NARRATIVE_PROMPT,
-
-Priority Elements: Time + location changes + narrative themes and subtext + sensory details that establish tone + atmosphere + mood + plot developments + proper names + character motivations + character interactions + dialogue tone + relationship dynamics + emotional beats + unresolved tensions.
-
-Exclude anything insubstantial, fluff, or events already covered in prior_context.
-
-Write in short *phrases* — up to 20; final response must be a single line:`,
 
     gamestate: `<player_name>
 {{player_name}}
@@ -478,7 +435,6 @@ function getSummarizedRangeStart(store, endIndex = store.summarizedUpTo) {
     return starts.length > 0 ? Math.min(...starts) : 0;
 }
 
-function getCharacterMemoryKey() {
 function normalizeCardFilename(value) {
     if (!value) return null;
     const decoded = (() => {
@@ -488,6 +444,7 @@ function normalizeCardFilename(value) {
 }
 
 function getCurrentCharacterIdentity() {
+
     const ctx = SillyTavern.getContext();
     const id = ctx.characterId ?? ctx.this_chid ?? ctx.chid ?? null;
     const character = ctx.character || (id !== null ? ctx.characters?.[id] : null) || {};
@@ -998,10 +955,12 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0) {
     const store = getChatStore();
     const s = getSettings();
 
-    // ── Phase 1: Mark metadata (fast, no DOM/command overhead) ──
+    const rangeStart = Math.max(0, Number.isInteger(startIndex) ? startIndex : 0);
+    const rangeEnd = Math.min(chat.length - 1, Number.isInteger(endIndex) ? endIndex : -1);
+    if (rangeStart > rangeEnd) return;
+
+    const ghostedIndices = new Set(store.ghostedIndices);
     let newlyGhosted = 0;
-    const rangeStart = startIndex;  // Only process from startIndex
-    const rangeEnd = endIndex;
 
     for (let i = rangeStart; i <= rangeEnd; i++) {
         const msg = chat[i];
@@ -1014,78 +973,28 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0) {
         if (msg.is_hidden) {
             log(`Skipping message ${i} — already hidden by user`);
             continue;
-    const boundedStart = Math.max(0, Math.min(Number.isInteger(startIndex) ? startIndex : 0, chat.length));
-    const boundedEnd = Math.min(Number.isInteger(endIndex) ? endIndex : -1, chat.length - 1);
-    if (boundedStart > boundedEnd) return;
+        }
 
-    const rangeLength = boundedEnd - boundedStart + 1;
-    const ghostedIndices = new Set(store.ghostedIndices);
-
-    const progressToast = toastr.info(
-        `Hiding messages: 0 / ${rangeLength}`,
-        'Summaryception — Ghosting',
-        {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            tapToDismiss: false,
+        if (!s.disableGhosting) {
+            try {
+                // Hide messages individually so system messages and messages hidden by
+                // the user are never accidentally included in a broad slash-command range.
+                await SillyTavern.getContext().executeSlashCommandsWithOptions(
+                    `/hide ${i}`,
+                    { showOutput: false }
+                );
+            } catch (error) {
+                console.error(LOG_PREFIX, `Failed to hide message ${i}:`, error);
+                continue;
+            }
         }
 
         msg.extra.sc_ghosted = true;
-
-        if (!store.ghostedIndices.includes(i)) {
-            store.ghostedIndices.push(i);
-        }
-
+        ghostedIndices.add(i);
         newlyGhosted++;
     }
 
-    // ── Phase 2: Single range-based /hide command (the expensive part) ──
-    if (!s.disableGhosting && newlyGhosted > 0) {
-        try {
-            // SillyTavern /hide supports inclusive ranges: /hide start-end
-            await SillyTavern.getContext().executeSlashCommandsWithOptions(
-                `/hide ${rangeStart}-${rangeEnd}`,
-                { showOutput: false }
-            );
-        } catch (e) {
-            console.error(LOG_PREFIX, `Failed to hide range ${rangeStart}-${rangeEnd}:`, e);
-        }
-    let examined = 0;
-    try {
-        for (let i = boundedStart; i <= boundedEnd; i++) {
-            const msg = chat[i];
-            if (msg && !(msg.is_system && !msg.extra?.sc_ghosted)) {
-                if (!msg.extra) msg.extra = {};
-                if (!msg.extra.sc_ghosted) {
-                    // Do not claim ownership of a message hidden by the user.
-                    if (msg.is_hidden) {
-                        log(`Skipping message ${i} — already hidden by user`);
-                    } else {
-                        msg.extra.sc_ghosted = true;
-                        ghostedIndices.add(i);
-
-                        // SillyTavern does not advertise these commands as safely batchable.
-                        await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false })
-                            .catch(e => log(`Failed to hide message ${i}:`, e));
-                    }
-                }
-            }
-
-            examined++;
-            if (examined % 10 === 0 || i === boundedEnd) {
-                const pct = Math.round((examined / rangeLength) * 100);
-                $(progressToast).find('.toast-message').text(
-                    `Hiding messages: ${examined} / ${rangeLength} (${pct}%)`
-                );
-            }
-        }
-
-        log(`Ghosted messages from index ${boundedStart} to ${boundedEnd}`);
-    } finally {
-        store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
-        clearPersistentToast(progressToast);
-    }
-
+    store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
     log(`Ghosted messages ${rangeStart}–${rangeEnd} (${newlyGhosted} newly marked)${s.disableGhosting ? ' (hiding disabled — metadata only)' : ''}`);
 }
 
@@ -1734,22 +1643,8 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
 
-    // ─── FIX: Filter out turns that are at or before summarizedUpTo ───
-    const eligibleTurns = visibleTurns.filter(t => t.index > store.summarizedUpTo);
-    trace('  eligibleTurns after filtering:', eligibleTurns.length);
-
-    if (eligibleTurns.length === 0) {
-        log('All visible turns are already summarized — repairing ghosting...');
-        const turnsToGhost = visibleTurns.filter(t => t.index <= store.summarizedUpTo);
-        for (const t of turnsToGhost) {
-            await ghostMessage(t.index);
-        }
-        await saveChatStore();
-        trace('<<< EXITING summarizeOneBatchFromTurns - REPAIRED GHOSTING');
-        return false;
-    }
-
     const eligibleTurns = visibleTurns.filter(turn => turn.index > store.summarizedUpTo);
+
     const batchSize = Math.min(s.turnsPerSummary, eligibleTurns.length);
     const batch = eligibleTurns.slice(0, batchSize);
 
@@ -1757,21 +1652,7 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
     trace('  batchSize:', batchSize);
     trace('  batch prepared:', batch.length);
 
-    if (batch.length === 0) {
-        trace('<<< EXITING summarizeOneBatchFromTurns - EMPTY BATCH');
-        return false;
-    }
 
-    const startIdx = batch[0].index;
-    const endIdx = batch[batch.length - 1].index;
-
-    trace('  startIdx:', startIdx, 'endIdx:', endIdx);
-    trace('  store.summarizedUpTo:', store.summarizedUpTo);
-
-    if (!store.layers[0]) store.layers[0] = [];
-
-    // ─── Start from the message AFTER the last summarized one ───
-    const passageStart = store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1;
     try {
         if (batch.length === 0) {
             const summarizedVisibleTurns = visibleTurns.filter(turn => turn.index <= store.summarizedUpTo);
@@ -1788,13 +1669,6 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         const endIdx = batch[batch.length - 1].index;
         const passageStart = startIdx;
 
-    // ─── SANITY CHECK: passageStart should always be <= endIdx ───
-    if (passageStart > endIdx) {
-        trace('  CRITICAL: passageStart > endIdx! This should never happen.');
-        trace('  This likely means the batch was already summarized.');
-        trace('<<< EXITING - passageStart > endIdx');
-        return 'EMPTY_SKIP';
-    }
         trace('  startIdx:', startIdx, 'endIdx:', endIdx);
         trace('  store.summarizedUpTo:', store.summarizedUpTo);
         trace('  passageStart:', passageStart, 'endIdx:', endIdx);
@@ -1806,19 +1680,12 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         trace('  buildPassageFromRange returned, length:', storyTxt?.length ?? 'UNDEFINED');
 
         if (!storyTxt.trim()) {
-            trace('  <<< EXITING - storyTxt is empty after trim');
-            trace('  This suggests all messages in range [' + passageStart + ', ' + endIdx + '] are hidden or empty');
-
-            // --- FIX: Advance pointer so we don't get stuck on these empty indexes ---
-            store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
-            await saveChatStore();
-
-            return 'EMPTY_SKIP';
             store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
             await saveChatStore();
             trace('  Empty passage skipped; summarizedUpTo advanced to:', store.summarizedUpTo);
             trace('<<< EXITING summarizeOneBatchFromTurns - EMPTY_SKIP');
             return CATCHUP_BATCH_RESULT.EMPTY_SKIP;
+
         }
 
         trace('  About to call buildFullContext...');
@@ -1929,10 +1796,6 @@ async function runCatchup(visibleTurns, overflow) {
                 trace('  >>> summarizeOneBatchFromTurns returned SUCCESS');
                 completed++;
                 consecutiveFailures = 0;
-            } else if (result === 'EMPTY_SKIP') {
-                trace('  >>> summarizeOneBatchFromTurns returned EMPTY_SKIP');
-                completed++;
-                consecutiveFailures = 0;
             } else if (result === CATCHUP_BATCH_RESULT.EMPTY_SKIP) {
                 trace('  >>> summarizeOneBatchFromTurns returned EMPTY_SKIP');
                 completed++;
@@ -1940,6 +1803,7 @@ async function runCatchup(visibleTurns, overflow) {
             } else if (result === CATCHUP_BATCH_RESULT.NO_ELIGIBLE) {
                 trace('  >>> summarizeOneBatchFromTurns returned NO_ELIGIBLE');
                 consecutiveFailures = 0;
+
             } else {
                 trace('  >>> summarizeOneBatchFromTurns returned FAILURE');
                 failed++;
@@ -3572,14 +3436,12 @@ function bindUIEvents() {
 
                 await unghostAllMessages();
 
-                store.layers = data.layers;
-                store.summarizedUpTo = data.summarizedUpTo ?? -1;
-                store.ghostedIndices = data.ghostedIndices || [];
-                normalizeChatStore(store);
-                invalidateContextCache(store);
                 store.layers = importedStore.layers;
                 store.summarizedUpTo = importedStore.summarizedUpTo ?? -1;
                 store.ghostedIndices = importedStore.ghostedIndices || [];
+                normalizeChatStore(store);
+                invalidateContextCache(store);
+
 
                 if (store.summarizedUpTo >= 0) {
                     await ghostMessagesUpTo(store.summarizedUpTo, getSummarizedRangeStart(store));
