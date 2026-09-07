@@ -308,7 +308,20 @@ function normalizeChatStore(store) {
     if (!Array.isArray(store.layers)) store.layers = [];
     if (typeof store.summarizedUpTo !== 'number') store.summarizedUpTo = -1;
     if (!Array.isArray(store.ghostedIndices)) store.ghostedIndices = [];
+    const chatLength = SillyTavern.getContext()?.chat?.length;
+    store.ghostedIndices = [...new Set(store.ghostedIndices.filter(index =>
+        Number.isInteger(index)
+        && index >= 0
+        && (!Number.isInteger(chatLength) || index < chatLength)
+    ))].sort((a, b) => a - b);
     return store;
+}
+
+function getSummarizedRangeStart(store, endIndex = store.summarizedUpTo) {
+    const starts = (store.layers[0] || [])
+        .map(snippet => snippet?.turnRange?.[0])
+        .filter(index => Number.isInteger(index) && index >= 0 && index <= endIndex);
+    return starts.length > 0 ? Math.min(...starts) : 0;
 }
 
 function getCharacterMemoryKey() {
@@ -544,7 +557,7 @@ async function activateCharacterMemoryStore() {
 
     const store = getChatStore();
     if (store.summarizedUpTo >= 0) {
-        await ghostMessagesUpTo(store.summarizedUpTo);
+        await ghostMessagesUpTo(store.summarizedUpTo, getSummarizedRangeStart(store));
     }
 }
 
@@ -564,6 +577,7 @@ async function repairGhostingForRange(startIdx, endIdx) {
 
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
+    const ghostedIndices = new Set(store.ghostedIndices);
     let repaired = 0;
     let skipped = 0;
 
@@ -601,9 +615,7 @@ async function repairGhostingForRange(startIdx, endIdx) {
         m.extra = m.extra || {};
         m.extra.sc_ghosted = true;
 
-        if (!store.ghostedIndices.includes(i)) {
-            store.ghostedIndices.push(i);
-        }
+        ghostedIndices.add(i);
 
         try {
             await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false });
@@ -613,6 +625,7 @@ async function repairGhostingForRange(startIdx, endIdx) {
         }
     }
 
+    store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
     trace('  Repaired:', repaired, 'Skipped:', skipped);
     await saveChatStore();
     trace('<<< EXITING repairGhostingForRange');
@@ -630,9 +643,9 @@ async function ghostMessage(messageIndex) {
 
     // Track that WE ghosted this message
     const store = getChatStore();
-    if (!store.ghostedIndices.includes(messageIndex)) {
-        store.ghostedIndices.push(messageIndex);
-    }
+    const ghostedIndices = new Set(store.ghostedIndices);
+    ghostedIndices.add(messageIndex);
+    store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
 
     try {
         await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${messageIndex}`, { showOutput: false });
@@ -707,12 +720,18 @@ async function unghostAllMessages(storeOverride = null) {
     }
 }
 
-async function ghostMessagesUpTo(endIndex) {
+async function ghostMessagesUpTo(endIndex, startIndex = 0) {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
+    const boundedStart = Math.max(0, Math.min(Number.isInteger(startIndex) ? startIndex : 0, chat.length));
+    const boundedEnd = Math.min(Number.isInteger(endIndex) ? endIndex : -1, chat.length - 1);
+    if (boundedStart > boundedEnd) return;
+
+    const rangeLength = boundedEnd - boundedStart + 1;
+    const ghostedIndices = new Set(store.ghostedIndices);
 
     const progressToast = toastr.info(
-        `Hiding messages: 0 / ${endIndex + 1}`,
+        `Hiding messages: 0 / ${rangeLength}`,
         'Summaryception — Ghosting',
         {
             timeOut: 0,
@@ -721,46 +740,39 @@ async function ghostMessagesUpTo(endIndex) {
         }
     );
 
-    let processed = 0;
+    let examined = 0;
     try {
-        for (let i = 0; i <= endIndex; i++) {
+        for (let i = boundedStart; i <= boundedEnd; i++) {
             const msg = chat[i];
-            if (!msg) continue;
-            if (msg.is_system && !msg.extra?.sc_ghosted) continue;
-            if (!msg.extra) msg.extra = {};
-            if (msg.extra.sc_ghosted) continue;
+            if (msg && !(msg.is_system && !msg.extra?.sc_ghosted)) {
+                if (!msg.extra) msg.extra = {};
+                if (!msg.extra.sc_ghosted) {
+                    // Do not claim ownership of a message hidden by the user.
+                    if (msg.is_hidden) {
+                        log(`Skipping message ${i} — already hidden by user`);
+                    } else {
+                        msg.extra.sc_ghosted = true;
+                        ghostedIndices.add(i);
 
-            // Check if the message is already hidden by the user (not by us)
-            // If so, skip it — don't claim ownership of a user-hidden message
-            if (msg.is_hidden) {
-                log(`Skipping message ${i} — already hidden by user`);
-                continue;
+                        // SillyTavern does not advertise these commands as safely batchable.
+                        await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false })
+                            .catch(e => log(`Failed to hide message ${i}:`, e));
+                    }
+                }
             }
 
-            msg.extra.sc_ghosted = true;
-
-            // Track that WE ghosted this message
-            if (!store.ghostedIndices.includes(i)) {
-                store.ghostedIndices.push(i);
-            }
-
-            try {
-                await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false });
-            } catch (e) {
-                log(`Failed to hide message ${i}:`, e);
-            }
-
-            processed++;
-            if (processed % 10 === 0 || i === endIndex) {
-                const pct = Math.round(((i + 1) / (endIndex + 1)) * 100);
+            examined++;
+            if (examined % 10 === 0 || i === boundedEnd) {
+                const pct = Math.round((examined / rangeLength) * 100);
                 $(progressToast).find('.toast-message').text(
-                    `Hiding messages: ${i + 1} / ${endIndex + 1} (${pct}%)`
+                    `Hiding messages: ${examined} / ${rangeLength} (${pct}%)`
                 );
             }
         }
 
-        log(`Ghosted messages from index 0 to ${endIndex}`);
+        log(`Ghosted messages from index ${boundedStart} to ${boundedEnd}`);
     } finally {
+        store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
         clearPersistentToast(progressToast);
     }
 }
@@ -1325,7 +1337,7 @@ async function summarizeOneBatch(visibleTurns) {
         });
 
         store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
-        await ghostMessagesUpTo(endIdx);
+        await ghostMessagesUpTo(endIdx, passageStart);
 
         log(`Layer 0 now has ${store.layers[0].length} snippets`);
 
@@ -1437,7 +1449,7 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         trace('  Updated store.summarizedUpTo to:', store.summarizedUpTo);
 
         await saveChatStore();
-        await ghostMessagesUpTo(endIdx);
+        await ghostMessagesUpTo(endIdx, passageStart);
         await maybePromoteLayer(0);
         await saveChatStore();
 
@@ -2935,7 +2947,10 @@ function bindUIEvents() {
                     { timeOut: 3000 }
                 );
 
-                const repaired = await repairGhostingForRange(0, store.summarizedUpTo);
+                const repaired = await repairGhostingForRange(
+                    getSummarizedRangeStart(store),
+                    store.summarizedUpTo
+                );
                 trace('  Repaired ' + repaired + ' messages');
                 toastr.info(
                     `Repaired ghosting for ${repaired} messages.`,
@@ -3056,9 +3071,10 @@ function bindUIEvents() {
                 store.layers = data.layers;
                 store.summarizedUpTo = data.summarizedUpTo ?? -1;
                 store.ghostedIndices = data.ghostedIndices || [];
+                normalizeChatStore(store);
 
                 if (store.summarizedUpTo >= 0) {
-                    await ghostMessagesUpTo(store.summarizedUpTo);
+                    await ghostMessagesUpTo(store.summarizedUpTo, getSummarizedRangeStart(store));
                 }
 
                 await saveChatStore();
