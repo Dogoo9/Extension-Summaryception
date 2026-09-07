@@ -20,6 +20,7 @@ import {
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
 const EXTENSION_VERSION = '5.5.4';
+const shownMigrationWarnings = new Set();
 // const TRACE_MODE = true;  // ultra-verbose logging
 
 // ─── Default Settings ────────────────────────────────────────────────
@@ -360,18 +361,51 @@ function normalizeChatStore(store) {
     return store;
 }
 
-function getCharacterMemoryKey() {
+function normalizeCardFilename(value) {
+    if (!value) return null;
+    const decoded = (() => {
+        try { return decodeURIComponent(String(value)); } catch { return String(value); }
+    })();
+    return decoded.replace(/\\/g, '/').split('/').pop().trim().toLowerCase() || null;
+}
+
+function getCurrentCharacterIdentity() {
     const ctx = SillyTavern.getContext();
-    const id = ctx.characterId ?? ctx.this_chid ?? ctx.chid;
-    if (id !== undefined && id !== null && id !== '') return `character:${id}`;
+    const id = ctx.characterId ?? ctx.this_chid ?? ctx.chid ?? null;
+    const character = ctx.character || (id !== null ? ctx.characters?.[id] : null) || {};
+    // Newer SillyTavern versions expose a persistent card id. Keep the list
+    // deliberately conservative: these fields identify the card, unlike chid.
+    const stableIdentifier = character.uuid
+        || character.character_uuid
+        || character.id
+        || character.data?.uuid
+        || character.data?.character_uuid
+        || character.data?.id
+        || character.data?.extensions?.sillytavern?.id
+        || null;
+    const avatarFilename = normalizeCardFilename(
+        character.avatar || character.data?.avatar || ctx.character?.avatar,
+    );
 
-    const candidate = ctx.character?.avatar
-        || ctx.character?.name
-        || ctx.characters?.[ctx.characterId]?.avatar
-        || ctx.characters?.[ctx.characterId]?.name
-        || ctx.name2;
+    return {
+        stableIdentifier: stableIdentifier ? String(stableIdentifier) : null,
+        avatarFilename,
+        characterName: character.name || ctx.name2 || 'Unknown character',
+        characterId: id,
+        formerKeys: [],
+        migrationStatus: 'current',
+    };
+}
 
-    return candidate ? `character:${candidate}` : 'character:unknown';
+function getCharacterMemoryKey() {
+    const identity = getCurrentCharacterIdentity();
+    if (identity.stableIdentifier) return `character:stable:${encodeURIComponent(identity.stableIdentifier)}`;
+    if (identity.avatarFilename) return `character:file:${encodeURIComponent(identity.avatarFilename)}`;
+
+    // chid is an array position and is only safe for the current ST session.
+    const id = identity.characterId;
+    if (id !== undefined && id !== null && id !== '') return `character:session:${id}`;
+    return 'character:unknown';
 }
 
 function getCharacterMemoryLabel() {
@@ -403,14 +437,72 @@ function getCurrentChatAttachmentInfo() {
         || chatId
         || 'Current chat';
 
+    const identity = getCurrentCharacterIdentity();
     return {
         chatId,
         chatName,
         characterId,
         characterName: ctx.character?.name || character?.name || ctx.name2 || 'Unknown character',
         characterAvatar: ctx.character?.avatar || character?.avatar || null,
+        stableIdentifier: identity.stableIdentifier,
+        avatarFilename: identity.avatarFilename,
         groupId,
         groupName: group?.name || null,
+    };
+}
+
+function attachmentsMatchActiveCard(attachment, identity) {
+    if (!attachment) return false;
+    if (identity.stableIdentifier && attachment.stableIdentifier) {
+        return String(attachment.stableIdentifier) === identity.stableIdentifier;
+    }
+    const savedAvatar = normalizeCardFilename(attachment.avatarFilename || attachment.characterAvatar);
+    if (identity.avatarFilename && savedAvatar) return savedAvatar === identity.avatarFilename;
+    return Boolean(attachment.characterName && identity.characterName
+        && attachment.characterName.trim().toLocaleLowerCase() === identity.characterName.trim().toLocaleLowerCase());
+}
+
+function migrateNumericCharacterBanks(memoryRoot, activeKey) {
+    const identity = getCurrentCharacterIdentity();
+    const candidates = Object.keys(memoryRoot.memories)
+        .filter(key => /^character:\d+$/.test(key))
+        .filter(key => attachmentsMatchActiveCard(memoryRoot.memoryAttachments[key], identity));
+    if (!candidates.length) return;
+
+    const targetOccupied = Boolean(memoryRoot.memories[activeKey]);
+    if (candidates.length !== 1 || targetOccupied) {
+        const warning = `Could not safely migrate ${candidates.join(', ')} to ${activeKey}; matching memory banks were preserved.`;
+        memoryRoot.migrationWarnings ||= [];
+        if (!memoryRoot.migrationWarnings.includes(warning)) memoryRoot.migrationWarnings.push(warning);
+        for (const key of candidates) {
+            memoryRoot.memoryIdentities[key] = {
+                ...identity,
+                formerKeys: [key],
+                migrationStatus: 'ambiguous-preserved',
+            };
+        }
+        if (!shownMigrationWarnings.has(warning)) {
+            toastr.warning(warning, 'Summaryception memory migration', { timeOut: 10000 });
+            shownMigrationWarnings.add(warning);
+        }
+        return;
+    }
+
+    const formerKey = candidates[0];
+    memoryRoot.memories[activeKey] = memoryRoot.memories[formerKey];
+    delete memoryRoot.memories[formerKey];
+    memoryRoot.memoryLabels[activeKey] = memoryRoot.memoryLabels[formerKey] || identity.characterName;
+    delete memoryRoot.memoryLabels[formerKey];
+    memoryRoot.memoryAttachments[activeKey] = {
+        ...memoryRoot.memoryAttachments[formerKey],
+        ...getCurrentChatAttachmentInfo(),
+    };
+    delete memoryRoot.memoryAttachments[formerKey];
+    delete memoryRoot.memoryIdentities[formerKey];
+    memoryRoot.memoryIdentities[activeKey] = {
+        ...identity,
+        formerKeys: [formerKey],
+        migrationStatus: 'migrated',
     };
 }
 
@@ -452,11 +544,14 @@ function getMemoryRoot() {
         });
 
         chatMetadata[MODULE_NAME] = {
-            version: 2,
+            version: 3,
             memoryMode: 'perCharacterCard',
             activeMemoryKey: activeKey,
             memories: {
                 [activeKey]: migratedStore,
+            },
+            memoryIdentities: {
+                [activeKey]: { ...getCurrentCharacterIdentity(), migrationStatus: 'legacy-store-migrated' },
             },
         };
     }
@@ -471,15 +566,36 @@ function getMemoryRoot() {
     if (!memoryRoot.memoryAttachments || typeof memoryRoot.memoryAttachments !== 'object') {
         memoryRoot.memoryAttachments = {};
     }
+    if (!memoryRoot.memoryIdentities || typeof memoryRoot.memoryIdentities !== 'object') {
+        memoryRoot.memoryIdentities = {};
+    }
+    for (const key of Object.keys(memoryRoot.memories)) {
+        if (memoryRoot.memoryIdentities[key]) continue;
+        const attachment = memoryRoot.memoryAttachments[key] || {};
+        memoryRoot.memoryIdentities[key] = {
+            stableIdentifier: attachment.stableIdentifier ? String(attachment.stableIdentifier) : null,
+            avatarFilename: normalizeCardFilename(attachment.avatarFilename || attachment.characterAvatar),
+            characterName: attachment.characterName || memoryRoot.memoryLabels[key] || 'Unknown character',
+            formerKeys: /^character:\d+$/.test(key) ? [key] : [],
+            migrationStatus: /^character:\d+$/.test(key) ? 'legacy-unmatched' : 'existing',
+        };
+    }
+    migrateNumericCharacterBanks(memoryRoot, activeKey);
     if (!memoryRoot.memories[activeKey]) {
         memoryRoot.memories[activeKey] = createEmptyChatStore();
     }
 
-    memoryRoot.version = 2;
+    memoryRoot.version = 3;
     memoryRoot.memoryMode = 'perCharacterCard';
     memoryRoot.activeMemoryKey = activeKey;
     memoryRoot.memoryLabels[activeKey] = getCharacterMemoryLabel();
     memoryRoot.memoryAttachments[activeKey] = getCurrentChatAttachmentInfo();
+    const previousIdentity = memoryRoot.memoryIdentities[activeKey] || {};
+    memoryRoot.memoryIdentities[activeKey] = {
+        ...getCurrentCharacterIdentity(),
+        formerKeys: Array.isArray(previousIdentity.formerKeys) ? previousIdentity.formerKeys : [],
+        migrationStatus: previousIdentity.migrationStatus || 'current',
+    };
 
     return normalizeChatStore(memoryRoot.memories[activeKey]);
 }
@@ -514,6 +630,9 @@ function getAllMemoryStores() {
         addEntry(key, root?.memories?.[key]);
     }
     for (const key of Object.keys(root?.memoryAttachments || {})) {
+        addEntry(key, root?.memories?.[key]);
+    }
+    for (const key of Object.keys(root?.memoryIdentities || {})) {
         addEntry(key, root?.memories?.[key]);
     }
 
@@ -2211,6 +2330,7 @@ function updateInjectionInspector(preview = assembleSummaryBlock()) {
 function getMemoryBankLabel(key) {
     const { chatMetadata } = SillyTavern.getContext();
     const root = chatMetadata[MODULE_NAME];
+    if (root?.memoryIdentities?.[key]?.characterName) return root.memoryIdentities[key].characterName;
     if (root?.memoryLabels?.[key]) return root.memoryLabels[key];
     if (root?.memoryAttachments?.[key]?.characterName) return root.memoryAttachments[key].characterName;
     if (key === getCharacterMemoryKey()) return getCharacterMemoryLabel();
@@ -2227,12 +2347,22 @@ function getMemoryBankAttachment(key) {
         return {
             ...currentAttachment,
             characterName: 'All characters in this chat',
+            stableIdentifier: null,
+            avatarFilename: null,
+            formerKeys: [],
+            migrationStatus: 'shared',
         };
     }
 
+    const identity = root?.memoryIdentities?.[key] || {};
+    const isActive = key === getCharacterMemoryKey();
     return {
-        ...currentAttachment,
+        ...(isActive ? currentAttachment : {}),
         ...(root?.memoryAttachments?.[key] || {}),
+        stableIdentifier: identity.stableIdentifier || root?.memoryAttachments?.[key]?.stableIdentifier || null,
+        avatarFilename: identity.avatarFilename || normalizeCardFilename(root?.memoryAttachments?.[key]?.characterAvatar),
+        formerKeys: Array.isArray(identity.formerKeys) ? identity.formerKeys : [],
+        migrationStatus: identity.migrationStatus || 'unmigrated',
         characterName: getMemoryBankLabel(key),
     };
 }
@@ -2266,6 +2396,10 @@ function getMemoryDatabaseSnapshot() {
             characterId: attachment.characterId,
             characterName: attachment.characterName,
             characterAvatar: attachment.characterAvatar,
+            stableIdentifier: attachment.stableIdentifier,
+            avatarFilename: attachment.avatarFilename,
+            formerKeys: attachment.formerKeys,
+            migrationStatus: attachment.migrationStatus,
             groupId: attachment.groupId,
             groupName: attachment.groupName,
             summarizedUpTo: store.summarizedUpTo ?? -1,
@@ -2283,6 +2417,7 @@ function getMemoryDatabaseSnapshot() {
         activeKey,
         activeLabel: getMemoryBankLabel(activeKey),
         bankCount: banks.length,
+        migrationWarnings: [...(root?.migrationWarnings || [])],
         banks,
     };
 }
@@ -2292,7 +2427,10 @@ function buildMemoryDatabaseHtml(snapshot) {
         return '<div class="sc-muted">No memory banks found.</div>';
     }
 
-    return snapshot.banks.map((bank) => {
+    const warningsHtml = snapshot.migrationWarnings?.length
+        ? `<div class="sc-db-migration-warning">⚠️ ${snapshot.migrationWarnings.map(escapeHtml).join('<br>')}</div>`
+        : '';
+    return warningsHtml + snapshot.banks.map((bank) => {
         const layerHtml = bank.layers
             .filter(layer => layer.snippets.length > 0)
             .map(layer => {
@@ -2330,6 +2468,10 @@ function buildMemoryDatabaseHtml(snapshot) {
 
         const attachmentRows = [
             ['Character', bank.characterName || 'Unknown character'],
+            bank.stableIdentifier ? ['Stable card ID', bank.stableIdentifier] : null,
+            bank.avatarFilename ? ['Card/avatar file', bank.avatarFilename] : null,
+            ['Migration', bank.migrationStatus],
+            bank.formerKeys?.length ? ['Former keys', bank.formerKeys.join(', ')] : null,
             ['Chat', bank.chatName || 'Current chat'],
             bank.chatId !== null && bank.chatId !== undefined ? ['Chat ID/file', bank.chatId] : null,
             bank.characterId !== null && bank.characterId !== undefined ? ['Character ID', bank.characterId] : null,
@@ -2342,6 +2484,9 @@ function buildMemoryDatabaseHtml(snapshot) {
                 <strong>${escapeHtml(String(value))}</strong>
             </div>`).join('');
 
+        const migrationWarning = bank.migrationStatus === 'ambiguous-preserved'
+            ? '<div class="sc-db-migration-warning">⚠️ Ambiguous identity match; this bank was preserved and not merged.</div>'
+            : '';
         return `
         <details class="sc-db-bank" ${bank.active ? 'open' : ''} data-bank-key="${escapeHtml(bank.key)}">
             <summary>
@@ -2349,6 +2494,7 @@ function buildMemoryDatabaseHtml(snapshot) {
                 <span class="sc-db-bank-meta">${bank.snippetCount} snippets · ${bank.ghostedIndices.length} ghosted · up to ${bank.summarizedUpTo}</span>
             </summary>
             <div class="sc-db-bank-key">Memory key: ${escapeHtml(bank.key)}</div>
+            ${migrationWarning}
             <div class="sc-db-bank-actions">
                 <button class="menu_button sc-db-bank-export-btn" type="button" data-bank-key="${escapeHtml(bank.key)}">
                     <i class="fa-solid fa-file-export"></i> Export Bank
@@ -3169,7 +3315,15 @@ function bindUIEvents() {
 
     $('#sc_export').on('click', function () {
         const store = getChatStore();
-        const blob = new Blob([JSON.stringify(store, null, 2)], { type: 'application/json' });
+        const key = getSettings().separateMemoryByCharacterCard ? getCharacterMemoryKey() : 'chat';
+        const exportedBank = {
+            format: 'summaryception-memory-bank-v3',
+            key,
+            label: getMemoryBankLabel(key),
+            attachment: getMemoryBankAttachment(key),
+            store,
+        };
+        const blob = new Blob([JSON.stringify(exportedBank, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -3189,7 +3343,8 @@ function bindUIEvents() {
             try {
                 const text = await file.text();
                 const data = JSON.parse(text);
-                if (!data.layers || !Array.isArray(data.layers)) {
+                const importedStore = data.store || data;
+                if (!importedStore.layers || !Array.isArray(importedStore.layers)) {
                     toastr.error('Invalid file format.');
                     return;
                 }
@@ -3204,6 +3359,9 @@ function bindUIEvents() {
                 store.ghostedIndices = data.ghostedIndices || [];
                 normalizeChatStore(store);
                 invalidateContextCache(store);
+                store.layers = importedStore.layers;
+                store.summarizedUpTo = importedStore.summarizedUpTo ?? -1;
+                store.ghostedIndices = importedStore.ghostedIndices || [];
 
                 if (store.summarizedUpTo >= 0) {
                     await ghostMessagesUpTo(store.summarizedUpTo);
