@@ -24,6 +24,30 @@ const EXTENSION_VERSION = '5.5.4';
 
 // ─── Default Settings ────────────────────────────────────────────────
 
+// Retained solely so settings saved with the previous built-in narrative prompt
+// can be upgraded without mistaking a user-authored prompt for a preset.
+const PREVIOUS_NARRATIVE_PROMPT = `<player_name>{{player_name}}</player_name>
+    <prior_context>{{context_str}}</prior_context>
+    <passage_in_question>{{story_txt}}</passage_in_question>
+
+    Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context.
+
+    Focus on: character interactions, dialogue tone, and relationship dynamics; emotional beats and character motivations; atmosphere, mood, and sensory details that establish tone; narrative themes and subtext; names, places, and time references; plot developments and unresolved tensions; details that distinguish this moment from any other.
+
+    Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
+    Skip any passages that are empty, unclear, or lack significant content.
+    Write in short phrases, no more than 20; output must be a single line:`;
+
+const NARRATIVE_PROMPT = `<player_name>{{player_name}}</player_name>
+    <prior_context>{{context_str}}</prior_context>
+    <passage_in_question>{{story_txt}}</passage_in_question>
+
+    Summarize only the necessary elements from passage_in_question to coherently continue prior_context. Second-person prose in the passage refers to {{player_name}}; include the player's name in the output.
+
+    Prioritize: character identities, interactions, dialogue tone, relationship dynamics, emotional beats, motivations, narrative themes and subtext; names, places, time references, plot developments, and unresolved goals or tensions. Retain atmosphere and sensory details when they are distinctive or show a change of state; omit generic atmosphere, generic prose, and repetition, including events already covered in prior_context.
+
+    When prior_context is empty, permit a larger initial summary so establishing identities, relationships, location, time, and unresolved goals are retained. Otherwise, write no more than 20 short phrases. Skip passages that are empty, unclear, or lack significant content. Keep the output compact and on a single line:`;
+
 const defaultSettings = Object.freeze({
     enabled: true,
     verbatimTurns: 10,
@@ -40,18 +64,7 @@ const defaultSettings = Object.freeze({
     summarizerSystemPrompt:
         'You are a precise narrative-state tracker. You output only the summary line — no preamble, no commentary, no markdown.',
 
-    summarizerUserPrompt:
-        `<player_name>{{player_name}}</player_name>
-    <prior_context>{{context_str}}</prior_context>
-    <passage_in_question>{{story_txt}}</passage_in_question>
-
-    Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context.
-
-    Focus on: character interactions, dialogue tone, and relationship dynamics; emotional beats and character motivations; atmosphere, mood, and sensory details that establish tone; narrative themes and subtext; names, places, and time references; plot developments and unresolved tensions; details that distinguish this moment from any other.
-
-    Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
-    Skip any passages that are empty, unclear, or lack significant content.
-    Write in short phrases, no more than 20; output must be a single line:`,
+    summarizerUserPrompt: NARRATIVE_PROMPT,
 
     promptPreset: 'narrative',  // 'narrative' | 'gamestate' | 'custom'
     pauseSummarization: false,  // true = stop processing, keep injecting
@@ -108,17 +121,7 @@ const defaultSettings = Object.freeze({
 // ─── Prompt Presets ──────────────────────────────────────────────────
 
 const PROMPT_PRESETS = {
-    narrative: `<player_name>{{player_name}}</player_name>
-    <prior_context>{{context_str}}</prior_context>
-    <passage_in_question>{{story_txt}}</passage_in_question>
-
-    Summarize only the necessary elements from the passage_in_question to coherently continue the prior_context.
-
-    Focus on: character interactions, dialogue tone, and relationship dynamics; emotional beats and character motivations; atmosphere, mood, and sensory details that establish tone; narrative themes and subtext; names, places, and time references; plot developments and unresolved tensions; details that distinguish this moment from any other.
-
-    Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
-    Skip any passages that are empty, unclear, or lack significant content.
-    Write in short phrases, no more than 20; output must be a single line:`,
+    narrative: NARRATIVE_PROMPT,
 
     gamestate: `<player_name>{{player_name}}</player_name>
     <prior_context>{{context_str}}</prior_context>
@@ -1989,16 +1992,14 @@ function updateUI() {
         $('#sc_injection_role').val(s.injectionRole || defaultSettings.injectionRole);
         $('#sc_injection_scan').prop('checked', Boolean(s.injectionScan));
         $('#sc_summarizer_system_prompt').val(s.summarizerSystemPrompt);
-        $('#sc_summarizer_user_prompt').val(s.summarizerUserPrompt);
         // ── Prompt preset migration & sync ──
-        // Migration: existing users with the old game-state default get upgraded to narrative.
-        // Users who customized their prompt get marked as 'custom'.
+        // Upgrade only exact prior built-ins. Never replace user-authored text.
         if (!s.promptPreset) {
             const currentPrompt = (s.summarizerUserPrompt || '').trim();
             const gameStatePrompt = PROMPT_PRESETS.gamestate.trim();
+            const previousNarrativePrompt = PREVIOUS_NARRATIVE_PROMPT.trim();
 
-            if (!currentPrompt || currentPrompt === gameStatePrompt) {
-                // User had the old default — upgrade to narrative
+            if (!currentPrompt || currentPrompt === gameStatePrompt || currentPrompt === previousNarrativePrompt) {
                 s.promptPreset = 'narrative';
                 s.summarizerUserPrompt = PROMPT_PRESETS.narrative;
                 saveSettings();
@@ -2007,8 +2008,14 @@ function updateUI() {
                 s.promptPreset = 'custom';
                 saveSettings();
             }
+        } else if (s.promptPreset === 'narrative'
+            && (s.summarizerUserPrompt || '').trim() === PREVIOUS_NARRATIVE_PROMPT.trim()) {
+            // The preset field already existed when this built-in prompt changed.
+            s.summarizerUserPrompt = PROMPT_PRESETS.narrative;
+            saveSettings();
         }
 
+        $('#sc_summarizer_user_prompt').val(s.summarizerUserPrompt);
         $('#sc_prompt_preset').val(s.promptPreset);
         $('#sc_debug_mode').prop('checked', s.debugMode);
         $('#sc_trace_mode').prop('checked', s.traceMode);
