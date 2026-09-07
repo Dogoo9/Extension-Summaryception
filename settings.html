@@ -361,6 +361,20 @@
                     <h4 class="sc-section-title">🔄 Layer Settings (the "ception")</h4>
 
                     <div class="sc-row">
+                        <label for="sc_context_budget">
+                            <span>Context Budget</span>
+                            <small class="sc-hint">Maximum assembled memory context. Token counts are estimated at four characters per token.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input id="sc_context_budget" class="text_pole" type="number" min="1" step="1" />
+                            <select id="sc_context_budget_unit" class="text_pole">
+                                <option value="tokens">Estimated tokens</option>
+                                <option value="characters">Characters</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
                         <label for="sc_snippets_per_layer">
                             <span>Max Snippets per Layer</span>
                             <small class="sc-hint">When exceeded, oldest snippets are promoted (re-summarized) into a deeper layer.</small>
