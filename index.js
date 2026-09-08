@@ -1,5 +1,5 @@
 /**
- * Summaryception v5.5.5 — Layered Recursive Summarization for SillyTavern
+ * Summaryception v5.5.7 — Layered Recursive Summarization for SillyTavern
  *
  * NON-DESTRUCTIVE: Uses SillyTavern's native /hide and /unhide commands
  * to exclude summarized messages from LLM context while keeping them
@@ -19,7 +19,7 @@ import {
 
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
-const EXTENSION_VERSION = '5.5.5';
+const EXTENSION_VERSION = '5.5.7';
 const shownMigrationWarnings = new Set();
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -546,7 +546,7 @@ function migrateNumericCharacterBanks(memoryRoot, activeKey) {
 
     const targetOccupied = Boolean(memoryRoot.memories[activeKey]);
     if (candidates.length !== 1 || targetOccupied) {
-        const warning = `Could not safely migrate ${candidates.join(', ')} to ${activeKey}; matching memory banks were preserved.`;
+        const warning = `Could not safely migrate ${candidates.join(', ')} to ${activeKey}; matching memory banks were preserved. Use Clean Up Legacy Banks in Summaryception settings after exporting anything you want to keep.`;
         memoryRoot.migrationWarnings ||= [];
         if (!memoryRoot.migrationWarnings.includes(warning)) memoryRoot.migrationWarnings.push(warning);
         for (const key of candidates) {
@@ -747,6 +747,58 @@ function getMemorySnippetByPath(bankKey, layerIndex, snippetIndex) {
     const layer = store?.layers?.[layerIndex];
     const snippet = Array.isArray(layer) ? layer[snippetIndex] : null;
     return { store, layer, snippet };
+}
+
+function deleteMemoryBank(bankKey) {
+    const { chatMetadata } = SillyTavern.getContext();
+    const root = chatMetadata[MODULE_NAME];
+    if (!root || bankKey === getCharacterMemoryKey() || bankKey === 'chat') return false;
+
+    const collections = ['memories', 'memoryLabels', 'memoryAttachments', 'memoryIdentities'];
+    const existed = collections.some(name => Object.hasOwn(root[name] || {}, bankKey));
+    if (!existed) return false;
+
+    for (const name of collections) {
+        if (root[name] && typeof root[name] === 'object') delete root[name][bankKey];
+    }
+
+    // Migration warnings are plain text in v3 metadata. Drop a warning once none
+    // of the legacy numeric keys named by it remain in the database.
+    if (Array.isArray(root.migrationWarnings)) {
+        root.migrationWarnings = root.migrationWarnings.filter((warning) => {
+            const legacyKeys = String(warning).match(/character:\d+/g) || [];
+            return legacyKeys.length === 0
+                || legacyKeys.some(key => Object.hasOwn(root.memories || {}, key));
+        });
+    }
+    shownMigrationWarnings.clear();
+    return true;
+}
+
+function getInactiveLegacyMemoryBankKeys() {
+    const activeKey = getCharacterMemoryKey();
+    const { chatMetadata } = SillyTavern.getContext();
+    const root = chatMetadata[MODULE_NAME];
+    return Object.keys(root?.memories || {})
+        .filter(key => key !== activeKey && /^character:\d+$/.test(key));
+}
+
+async function confirmAndCleanupLegacyMemoryBanks() {
+    // Initialize migrations first so every bank mentioned by the warning is
+    // present before the user is shown the destructive confirmation.
+    getChatStore();
+    const legacyKeys = getInactiveLegacyMemoryBankKeys();
+    if (!legacyKeys.length) {
+        toastr.info('No inactive legacy numeric memory banks were found.', 'Summaryception', { timeOut: 2000 });
+        return 0;
+    }
+
+    if (!confirm(`Permanently delete ${legacyKeys.length} inactive legacy memory bank${legacyKeys.length === 1 ? '' : 's'} (${legacyKeys.join(', ')})? Export them first if you may need them later.`)) return 0;
+
+    const deletedCount = legacyKeys.reduce((count, key) => count + Number(deleteMemoryBank(key)), 0);
+    if (deletedCount > 0) await persistMemoryDatabaseChange();
+    toastr.success(`Deleted ${deletedCount} legacy memory bank${deletedCount === 1 ? '' : 's'}.`, 'Summaryception', { timeOut: 3000 });
+    return deletedCount;
 }
 
 function recalculateSummarizedUpTo(store) {
@@ -2573,6 +2625,10 @@ function buildMemoryDatabaseHtml(snapshot) {
                 <button class="menu_button sc-db-bank-export-btn" type="button" data-bank-key="${escapeHtml(bank.key)}">
                     <i class="fa-solid fa-file-export"></i> Export Bank
                 </button>
+                ${bank.active ? '' : `
+                <button class="menu_button menu_button_danger sc-db-bank-delete-btn" type="button" data-bank-key="${escapeHtml(bank.key)}">
+                    <i class="fa-solid fa-trash"></i> Delete Bank
+                </button>`}
             </div>
             <div class="sc-db-attachments">${attachmentRows}</div>
             ${layerHtml}
@@ -2609,6 +2665,7 @@ function showMemoryDatabaseModal() {
         <div class="sc-db-toolbar">
             <input id="sc_db_filter" class="text_pole" type="search" placeholder="Filter banks and snippets..." />
             <button id="sc_db_refresh" class="menu_button"><i class="fa-solid fa-rotate"></i> Refresh</button>
+            <button id="sc_db_cleanup_legacy" class="menu_button menu_button_danger"><i class="fa-solid fa-broom"></i> Clean Up Legacy Banks</button>
             <button id="sc_db_copy" class="menu_button"><i class="fa-solid fa-copy"></i> Copy JSON</button>
             <button id="sc_db_export_all" class="menu_button"><i class="fa-solid fa-file-export"></i> Export All</button>
         </div>
@@ -2748,6 +2805,25 @@ function showMemoryDatabaseModal() {
             return;
         }
 
+        const bankDeleteButton = event.target.closest('.sc-db-bank-delete-btn');
+        if (bankDeleteButton) {
+            const bankKey = bankDeleteButton.dataset.bankKey;
+            if (!bankKey || bankKey === getCharacterMemoryKey() || bankKey === 'chat') {
+                toastr.warning('The active memory bank cannot be deleted. Use Clear Memory instead.', 'Summaryception');
+                return;
+            }
+            if (!confirm(`Permanently delete memory bank "${bankKey}" and all of its snippets? Export it first if you may need it later.`)) return;
+            if (!deleteMemoryBank(bankKey)) {
+                toastr.error('Could not find that memory bank. Refreshing database view.', 'Summaryception');
+                refreshDatabaseView();
+                return;
+            }
+            await persistMemoryDatabaseChange();
+            refreshDatabaseView();
+            toastr.success('Memory bank deleted.', 'Summaryception', { timeOut: 2000 });
+            return;
+        }
+
         const editButton = event.target.closest('.sc-db-snippet-edit-btn');
         if (!editButton) return;
 
@@ -2770,6 +2846,10 @@ function showMemoryDatabaseModal() {
     overlay.querySelector('#sc_db_refresh').addEventListener('click', () => {
         refreshDatabaseView();
         toastr.info('Memory database refreshed.', 'Summaryception', { timeOut: 1500 });
+    });
+
+    overlay.querySelector('#sc_db_cleanup_legacy').addEventListener('click', async () => {
+        if (await confirmAndCleanupLegacyMemoryBanks()) refreshDatabaseView();
     });
 
     overlay.querySelector('#sc_db_copy').addEventListener('click', async () => {
@@ -3221,6 +3301,10 @@ function bindUIEvents() {
 
     $('#sc_view_database').on('click', function () {
         showMemoryDatabaseModal();
+    });
+
+    $('#sc_cleanup_legacy_banks').on('click', async function () {
+        await confirmAndCleanupLegacyMemoryBanks();
     });
 
     $('#sc_clear_memory').on('click', async function () {
