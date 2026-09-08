@@ -225,7 +225,7 @@ Summaryception can keep memory separated by the active character card inside eac
 
 Existing single-bank memories are migrated automatically to the currently active card the first time the feature is used. Banks now retain a card identity record (stable SillyTavern card identifier when available, normalized avatar/card filename, display name, and former keys). Legacy numeric-id banks are migrated only when their saved attachment matches the active card; ambiguous matches remain separate and are called out in the database viewer and exports.
 
-When an ambiguous migration preserves obsolete numeric banks, use the prominently displayed **Clean Up Legacy Banks** button beside **View Memory Database** to delete every inactive `character:<number>` bank after one confirmation. You can also open the database to export or delete inactive banks individually. The active card bank and shared chat bank are protected from deletion; use **Clear Memory** when you intend to reset the active bank.
+When an ambiguous migration preserves obsolete numeric banks, open **View Memory Database** to export and delete banks individually, or choose **Clean Up Legacy Banks** to delete every inactive `character:<number>` bank after one confirmation. The active card bank and shared chat bank are protected from deletion; use **Clear Memory** when you intend to reset the active bank.
 
 ### Limitations
 

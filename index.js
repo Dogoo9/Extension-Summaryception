@@ -1,5 +1,5 @@
 /**
- * Summaryception v5.5.7 — Layered Recursive Summarization for SillyTavern
+ * Summaryception v5.5.6 — Layered Recursive Summarization for SillyTavern
  *
  * NON-DESTRUCTIVE: Uses SillyTavern's native /hide and /unhide commands
  * to exclude summarized messages from LLM context while keeping them
@@ -19,7 +19,7 @@ import {
 
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
-const EXTENSION_VERSION = '5.5.7';
+const EXTENSION_VERSION = '5.5.6';
 const shownMigrationWarnings = new Set();
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -773,32 +773,6 @@ function deleteMemoryBank(bankKey) {
     }
     shownMigrationWarnings.clear();
     return true;
-}
-
-function getInactiveLegacyMemoryBankKeys() {
-    const activeKey = getCharacterMemoryKey();
-    const { chatMetadata } = SillyTavern.getContext();
-    const root = chatMetadata[MODULE_NAME];
-    return Object.keys(root?.memories || {})
-        .filter(key => key !== activeKey && /^character:\d+$/.test(key));
-}
-
-async function confirmAndCleanupLegacyMemoryBanks() {
-    // Initialize migrations first so every bank mentioned by the warning is
-    // present before the user is shown the destructive confirmation.
-    getChatStore();
-    const legacyKeys = getInactiveLegacyMemoryBankKeys();
-    if (!legacyKeys.length) {
-        toastr.info('No inactive legacy numeric memory banks were found.', 'Summaryception', { timeOut: 2000 });
-        return 0;
-    }
-
-    if (!confirm(`Permanently delete ${legacyKeys.length} inactive legacy memory bank${legacyKeys.length === 1 ? '' : 's'} (${legacyKeys.join(', ')})? Export them first if you may need them later.`)) return 0;
-
-    const deletedCount = legacyKeys.reduce((count, key) => count + Number(deleteMemoryBank(key)), 0);
-    if (deletedCount > 0) await persistMemoryDatabaseChange();
-    toastr.success(`Deleted ${deletedCount} legacy memory bank${deletedCount === 1 ? '' : 's'}.`, 'Summaryception', { timeOut: 3000 });
-    return deletedCount;
 }
 
 function recalculateSummarizedUpTo(store) {
@@ -2849,7 +2823,19 @@ function showMemoryDatabaseModal() {
     });
 
     overlay.querySelector('#sc_db_cleanup_legacy').addEventListener('click', async () => {
-        if (await confirmAndCleanupLegacyMemoryBanks()) refreshDatabaseView();
+        snapshot = getMemoryDatabaseSnapshot();
+        const legacyBanks = snapshot.banks.filter(bank => !bank.active && /^character:\d+$/.test(bank.key));
+        if (!legacyBanks.length) {
+            toastr.info('No inactive legacy numeric memory banks were found.', 'Summaryception', { timeOut: 2000 });
+            return;
+        }
+        const bankList = legacyBanks.map(bank => bank.key).join(', ');
+        if (!confirm(`Permanently delete ${legacyBanks.length} inactive legacy memory bank${legacyBanks.length === 1 ? '' : 's'} (${bankList})? Export All first if you may need them later.`)) return;
+
+        const deletedCount = legacyBanks.reduce((count, bank) => count + Number(deleteMemoryBank(bank.key)), 0);
+        await persistMemoryDatabaseChange();
+        refreshDatabaseView();
+        toastr.success(`Deleted ${deletedCount} legacy memory bank${deletedCount === 1 ? '' : 's'}.`, 'Summaryception', { timeOut: 3000 });
     });
 
     overlay.querySelector('#sc_db_copy').addEventListener('click', async () => {
