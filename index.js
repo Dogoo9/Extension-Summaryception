@@ -546,7 +546,7 @@ function migrateNumericCharacterBanks(memoryRoot, activeKey) {
 
     const targetOccupied = Boolean(memoryRoot.memories[activeKey]);
     if (candidates.length !== 1 || targetOccupied) {
-        const warning = `Could not safely migrate ${candidates.join(', ')} to ${activeKey}; matching memory banks were preserved.`;
+        const warning = `Could not safely migrate ${candidates.join(', ')} to ${activeKey}; matching memory banks were preserved. Use Clean Up Legacy Banks in Summaryception settings after exporting anything you want to keep.`;
         memoryRoot.migrationWarnings ||= [];
         if (!memoryRoot.migrationWarnings.includes(warning)) memoryRoot.migrationWarnings.push(warning);
         for (const key of candidates) {
@@ -3287,6 +3287,10 @@ function bindUIEvents() {
 
     $('#sc_view_database').on('click', function () {
         showMemoryDatabaseModal();
+    });
+
+    $('#sc_cleanup_legacy_banks').on('click', async function () {
+        await confirmAndCleanupLegacyMemoryBanks();
     });
 
     $('#sc_clear_memory').on('click', async function () {
