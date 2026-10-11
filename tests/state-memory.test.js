@@ -1,10 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyState, parseStateResponse, correctState, effectiveFacts, rollbackState, validateStoredState, MAX_CHECKPOINTS, messageSignature, firstSourceChange } from '../state-memory.js';
+import { emptyState, parseStateResponse, parseFactResponse, factInstructions, correctState, effectiveFacts, rollbackState, validateStoredState, MAX_CHECKPOINTS, messageSignature, firstSourceChange } from '../state-memory.js';
 import { assembleBudgetedMemory, assembleBudgetedMemoryAsync, createMeter } from '../memory-budget.js';
 
 const set = (id, category, value, source) => ({ op: 'set', id, category, value, source });
 const apply = (state, range, changes = []) => parseStateResponse(JSON.stringify({ summary: 'Narrative delta.', stateChanges: changes }), state, range).state;
+
+test('fact-only catch-up uses the same strict changes and locks without requesting narrative', () => {
+    const state = correctState(emptyState(), { id: 'item.key.owner', category: 'item', value: 'Ivo' }, 5);
+    const prompt = factInstructions(state, [0, 3]);
+    assert.match(prompt, /exactly one field/);
+    assert.ok(!prompt.includes('"summary"'));
+    const next = parseFactResponse(JSON.stringify({ stateChanges: [set('item.key.owner', 'item', 'Mara', [0, 3])] }), state, [0, 3]);
+    assert.equal(effectiveFacts(next)[0].value, 'Ivo');
+    assert.equal(next.through, 3);
+    for (const raw of ['{"stateChanges":', '{"summary":"ignored","stateChanges":[]}', '[]', '{"stateChanges":[]} trailing', JSON.stringify({ stateChanges: [set('x', 'fact', 'y', [4, 5])] })]) {
+        assert.throws(() => parseFactResponse(raw, state, [0, 3]));
+    }
+    assert.equal(state.through, -1);
+});
 
 test('item transfers, location changes, injury persistence and explicit goal resolution', () => {
     const initial = apply(emptyState(), [0, 3], [set('scene.location', 'location', 'Tavern', [0, 3]), set('item.key.owner', 'item', 'Mara', [1, 3]), set('injury.mara.hand', 'injury', 'Cut, unhealed', [2, 3]), set('goal.find_ivo', 'goal', 'Find Ivo', [0, 3])]);
