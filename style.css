@@ -105,6 +105,18 @@
     flex-wrap: wrap;
 }
 
+#sc_state_fact, #sc_state_id, #sc_state_category {
+    width: 100%;
+    margin-bottom: 6px;
+}
+
+.sc-db-state pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 20rem;
+    overflow: auto;
+}
+
 .sc-settings .menu_button_danger {
     color: #ff6b6b;
     border-color: #ff6b6b;

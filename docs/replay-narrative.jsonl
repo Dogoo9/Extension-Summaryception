@@ -1,0 +1,37 @@
+{"user_name": "Alex", "character_name": "Mara", "create_date": "2026-10-12T00:00:00.000Z", "chat_metadata": {}}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara, take the brass key. You cut your left hand on the broken glass; do not pretend it healed."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara pockets the brass key. Her left hand has an unhealed cut. Alex and Mara are in the Copper Tavern before dawn."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "We need to find Ivo. Let us walk to the east gate."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Alex and Mara reach the east gate. Their immediate goal is to find Ivo."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Ivo is waiting here. We have found him; that task is complete."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Ivo joins Alex and Mara. The goal of finding Ivo is resolved. He shows evidence that clears him of the theft."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara, give the brass key to Ivo so he can carry it."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara hands the brass key to Ivo. He puts it in his coat pocket and remains its owner."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Let us cross the old bridge to the northern archive. We must open its locked entrance."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "The three arrive at the northern archive at dawn. Their next goal is to open the locked archive entrance."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Ivo, open the archive with your key."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Ivo uses the brass key to open the archive. He pockets it again. Opening the entrance is complete."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "The archivist gave us a sealed letter for Rector Senn. We still need to deliver it."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara carries the sealed letter. Delivering it to Rector Senn remains an unresolved task."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Wrap Mara's left hand so it stops bleeding. A bandage is not healing."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Alex bandages the cut on Mara's left hand. The injury is still unhealed."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Let us sit in the archive reading room together."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Alex, Mara and Ivo enter the archive reading room. They sit near a dusty table."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Tell me what the room sounds like."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Pages rustle and a distant clock ticks. They listen in silence."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara, do you like the carved wooden birds on this shelf?"}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara smiles at a carved swallow. She prefers its crooked wing to a perfectly symmetrical ornament."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Ivo, the dust makes the sunlight look silver."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Ivo watches the particles drift in a pale shaft of light, then turns a blank notebook page."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Let us keep our conversation quiet."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "The three lower their voices so they will not disturb the readers nearby."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "We can wait here in the reading room for a moment."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "They remain in the reading room. A reader at another table starts copying a poem."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Which kind of poem would you choose to copy?"}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara would choose a short poem about rain; Ivo prefers one about a ship leaving port."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "I like a poem that leaves room for interpretation."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara agrees. Ivo says a story need not explain every silence."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "That shelf looks as though it has been repaired several times."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "Mara notices mismatched pegs in the shelf. Ivo admires the patience of whoever repaired it."}
+{"name": "Alex", "is_user": true, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "We can appreciate how many people helped keep this place standing."}
+{"name": "Mara", "is_user": false, "is_system": false, "send_date": "2026-10-12T00:00:00.000Z", "mes": "The three reflect on the anonymous work behind the room's quiet order. Their conversation pauses."}

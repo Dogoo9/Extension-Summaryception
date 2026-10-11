@@ -61,6 +61,47 @@
 
             <hr class="sc-divider" />
 
+            <h4 class="sc-section-title">🧭 Structured State (Optional)</h4>
+            <label class="checkbox_label" for="sc_state_enabled">
+                <input type="checkbox" id="sc_state_enabled" />
+                <span>Track facts alongside narrative summaries</span>
+            </label>
+            <p class="sc-hint">Extracts a validated fact snapshot in the same batch call. Layer promotions keep this snapshot intact. Starts with the next batch; use Rebuild to include older messages. Later visible messages take precedence. JSON extraction can require a larger response token limit.</p>
+            <div id="sc_state_details" style="display: none;">
+                <div class="sc-row">
+                    <label for="sc_state_allowance">State allowance within the total memory budget (tokens, estimated when no tokenizer is available)</label>
+                    <input id="sc_state_allowance" type="number" class="text_pole" min="400" max="800" step="50" />
+                </div>
+                <div id="sc_state_status" class="sc-stats-box"></div>
+                <label for="sc_state_fact">Inspect / correct a fact</label>
+                <select id="sc_state_fact" class="text_pole"></select>
+                <div class="sc-row">
+                    <label for="sc_state_id">Stable fact ID</label>
+                    <input id="sc_state_id" class="text_pole" placeholder="item.brass_key.owner" maxlength="96" />
+                    <label for="sc_state_category">Category</label>
+                    <select id="sc_state_category" class="text_pole">
+                        <option value="location">Location</option><option value="time">Time</option>
+                        <option value="present">Present characters</option><option value="relationship">Relationship</option>
+                        <option value="item">Item ownership</option><option value="injury">Injury</option>
+                        <option value="goal">Goal / unresolved thread</option><option value="fact">Durable fact</option>
+                    </select>
+                    <label for="sc_state_value">Fact value</label>
+                    <textarea id="sc_state_value" class="text_pole sc-textarea" rows="2" maxlength="400"></textarea>
+                </div>
+                <p class="sc-hint">Pin locks your correction against model changes; Remove locks its absence. Unlock resumes automatic tracking. Corrections are anchored to the latest message and invalidated if that source history changes.</p>
+                <div class="sc-button-row">
+                    <button id="sc_state_pin" class="menu_button">Pin Correction</button>
+                    <button id="sc_state_remove" class="menu_button">Remove &amp; Lock</button>
+                    <button id="sc_state_unlock" class="menu_button">Unlock</button>
+                    <button id="sc_state_rebuild" class="menu_button">Rebuild Active Memory</button>
+                </div>
+                <details><summary>Stored snapshot, source ranges, and checkpoints</summary>
+                    <textarea id="sc_state_json" class="text_pole sc-textarea" rows="8" readonly></textarea>
+                </details>
+            </div>
+
+            <hr class="sc-divider" />
+
             <!-- ═══ Snippet Browser ═══ -->
             <h4 class="sc-section-title">🗂️ Snippet Browser</h4>
             <div id="sc_snippet_browser" class="sc-snippet-browser"></div>
@@ -126,7 +167,7 @@
                         <div class="summaryception-setting-row">
                             <label for="sc_summarizer_response_length">
                                 <span>Summarizer Response Length</span>
-                                <small>Override max response tokens for summarizer calls (Default/Profile modes). 0 = use your preset's value. If you get "max_tokens > 4096 must have stream=true" errors, set to 4096. For reasoning models, ensure this is high enough for thinking + output.</small>
+                                <small>Limit summary response tokens where supported. 0 uses the source default (Default: active preset; Profile/Completion/KoboldCPP: 512). OpenAI Compatible has its own Max Tokens field. Allow enough tokens for thinking plus the complete JSON response when tracking structured state.</small>
                             </label>
                             <input id="sc_summarizer_response_length" type="number" class="text_pole" min="0" step="100" value="0" placeholder="0 = use preset default" />
                         </div>
@@ -191,10 +232,7 @@
                             <div class="summaryception-note">
                                 <span class="fa-solid fa-info-circle"></span>
                                 <small>
-                                    Uses a saved SillyTavern Connection Profile. Includes endpoint, API key, model, and presets.
-                                    Requires ST 1.12.4+. For full API key support, use staging (March 2026+).
-                                    ⚠️ Connection Profiles inject preset formatting into summary requests, which may degrade summary quality.
-                                    ⚠️ Consider using Default or OpenAI Compatible instead.
+                                    Uses the profile's endpoint, API key, and model. Summary requests bypass its creative preset and instruct formatting. Summary temperature, stop sequences, and response limit apply independently. Requires ST 1.16.0+.
                                 </small>
                             </div>
                         </div>
@@ -374,7 +412,7 @@
                     <div class="sc-row">
                         <label for="sc_context_budget">
                             <span>Context Budget</span>
-                            <small class="sc-hint">Maximum assembled memory context. Token counts are estimated at four characters per token.</small>
+                            <small class="sc-hint">Maximum injected memory including labels and wrapper. Keeps complete facts and snippets; omitted content stays stored. Uses an available tokenizer, otherwise estimates four characters per token. A wrapper larger than this budget produces an empty injection.</small>
                         </label>
                         <div class="sc-slider-row">
                             <input id="sc_context_budget" class="text_pole" type="number" min="1" step="1" />
