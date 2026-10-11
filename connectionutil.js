@@ -34,11 +34,12 @@ const LLM_DEFAULTS = Object.freeze({
  * (e.g. missing config, auth failures, deleted profiles).
  */
 class ConnectionError extends Error {
-    constructor(message, { retryable = false, status = null } = {}) {
+    constructor(message, { retryable = false, status = null, retryAfter = null } = {}) {
         super(message);
         this.name = 'ConnectionError';
         this.retryable = retryable;
         this.status = status;
+        this.retryAfter = retryAfter;
     }
 }
 
@@ -82,14 +83,35 @@ function getProxyHeaders() {
  * @returns {Promise<string>} - The generated response text
  * @throws {ConnectionError|Error} - If the request fails
  */
-export async function sendSummarizerRequest(settings, systemPrompt, userPrompt) {
+export async function sendSummarizerRequest(settings, systemPrompt, userPrompt, { signal } = {}) {
+    if (signal) {
+        signal.throwIfAborted();
+        return routeSummarizerRequest({ ...settings, requestSignal: signal }, systemPrompt, userPrompt);
+    }
+    // Connection-test buttons use the same timeout as normal requests.
+    const controller = new AbortController();
+    let timer;
+    try {
+        return await Promise.race([
+            routeSummarizerRequest({ ...settings, requestSignal: controller.signal }, systemPrompt, userPrompt),
+            new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                    controller.abort();
+                    reject(new ConnectionError('Connection request timed out.', { retryable: true }));
+                }, Math.max(1000, Number(settings.summarizerTimeoutMs) || 120000));
+            }),
+        ]);
+    } finally { clearTimeout(timer); }
+}
+
+async function routeSummarizerRequest(settings, systemPrompt, userPrompt) {
     const source = settings.connectionSource || 'default';
 
     switch (source) {
         case 'profile':
-            return await sendViaProfile(settings.connectionProfileId, systemPrompt, userPrompt);
+            return await sendViaProfile(settings.connectionProfileId, systemPrompt, userPrompt, settings);
         case 'ollama':
-            return await sendViaOllama(settings.ollamaUrl, settings.ollamaModel, systemPrompt, userPrompt);
+            return await sendViaOllama(settings.ollamaUrl, settings.ollamaModel, systemPrompt, userPrompt, settings);
         case 'openai':
             return await sendViaOpenAI(settings.openaiUrl, settings.openaiKey, settings.openaiModel, systemPrompt, userPrompt, settings.openaiMaxTokens, settings);
         case 'koboldcpp':
@@ -100,7 +122,7 @@ export async function sendSummarizerRequest(settings, systemPrompt, userPrompt) 
             return await sendViaCustomHttp(settings, systemPrompt, userPrompt);
         case 'default':
         default:
-            return await sendViaDefault(systemPrompt, userPrompt, settings.summarizerResponseLength);
+            return await sendViaDefault(systemPrompt, userPrompt, settings.summarizerResponseLength, settings.requestSignal);
     }
 }
 
@@ -109,8 +131,9 @@ export async function sendSummarizerRequest(settings, systemPrompt, userPrompt) 
 /**
  * Uses ST's built-in generateRaw(), which routes through the active connection.
  */
-async function sendViaDefault(systemPrompt, userPrompt, responseLength) {
-    const { generateRaw } = SillyTavern.getContext();
+async function sendViaDefault(systemPrompt, userPrompt, responseLength, signal) {
+    const context = SillyTavern.getContext();
+    const { generateRaw } = context;
 
     if (!generateRaw) {
         throw new ConnectionError(
@@ -130,28 +153,43 @@ async function sendViaDefault(systemPrompt, userPrompt, responseLength) {
     // object-style, 2+ means positional-style.
 
     let result;
+    const stopRaw = () => {
+        // generateRaw has no abortSignal option in ST 1.16. It subscribes to the
+        // native stop event. This can also stop concurrent raw generations.
+        const types = context.eventTypes || context.event_types;
+        if (types?.GENERATION_STOPPED && context.eventSource?.emit) {
+            const emission = context.eventSource.emit(types.GENERATION_STOPPED);
+            emission?.catch?.(error => console.warn(`${MODULE_NAME} Stop event failed:`, error));
+        }
+    };
+    signal?.throwIfAborted();
+    signal?.addEventListener('abort', stopRaw, { once: true });
+    try {
 
-    if (generateRaw.length <= 1) {
-        // Modern ST: object-based params
-        const options = {
-            systemPrompt: systemPrompt,
-            prompt: userPrompt,
-        };
+        if (generateRaw.length <= 1) {
+            // Modern ST: object-based params
+            const options = {
+                systemPrompt: systemPrompt,
+                prompt: userPrompt,
+            };
 
-        if (responseLength && responseLength > 0) {
-            options.responseLength = responseLength;
+            if (responseLength && responseLength > 0) {
+                options.responseLength = responseLength;
+            }
+
+            result = await generateRaw(options);
+        } else {
+            // Legacy ST: positional args — generateRaw(prompt, systemPrompt)
+            // Note: legacy signature does not support responseLength override
+            console.warn(
+                '[Summaryception] Detected legacy generateRaw (positional args). ' +
+                'Consider updating SillyTavern to July 2025+ for full feature support.'
+            );
+            result = await generateRaw(userPrompt, systemPrompt);
         }
 
-        result = await generateRaw(options);
-    } else {
-        // Legacy ST: positional args — generateRaw(prompt, systemPrompt)
-        // Note: legacy signature does not support responseLength override
-        console.warn(
-            '[Summaryception] Detected legacy generateRaw (positional args). ' +
-            'Consider updating SillyTavern to July 2025+ for full feature support.'
-        );
-        result = await generateRaw(userPrompt, systemPrompt);
-    }
+    } finally { signal?.removeEventListener('abort', stopRaw); }
+    signal?.throwIfAborted();
 
     if (!result || typeof result !== 'string') {
         throw new ConnectionError(
@@ -175,7 +213,7 @@ async function sendViaDefault(systemPrompt, userPrompt, responseLength) {
  * the second argument causes the entire object to be stuffed into the message
  * content field, resulting in "Invalid input" / validation errors from the API.
  */
-async function sendViaProfile(profileId, systemPrompt, userPrompt) {
+async function sendViaProfile(profileId, systemPrompt, userPrompt, settings = {}) {
     if (!profileId) {
         throw new ConnectionError(
             'No Connection Profile selected. Please select one in Summaryception settings.',
@@ -204,16 +242,22 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt) {
 
     try {
         // Build messages as proper {role, content} objects.
-        // sendRequest expects: sendRequest(profileId, messages, options?)
+        // ST 1.16: sendRequest(profileId, messages, maxTokens, options)
         // where messages is a string OR an array of {role, content} objects.
         const messages = [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
         ];
 
-        const raw = await service.sendRequest(profileId, messages, {
-            ignoreInstruct: true,
-        });
+        const raw = await service.sendRequest(profileId, messages,
+            settings.summarizerResponseLength || settings.openaiMaxTokens || 512, {
+                includePreset: false,
+                includeInstruct: false,
+                extractData: true,
+                stream: false,
+                signal: settings.requestSignal,
+            }, { temperature: Number(settings.summarizerTemperature ?? 0.3),
+                ...(settings.summarizerStopSequences?.length ? { stop: settings.summarizerStopSequences } : {}) });
 
         // Handle various possible return types
         let result;
@@ -225,8 +269,8 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt) {
             result = raw.message.content;
         } else if (raw?.choices?.[0]?.message?.content) {
             result = raw.choices[0].message.content;
-        } else if (raw?.data) {
-            result = typeof raw.data === 'string' ? raw.data : JSON.stringify(raw.data);
+        } else if (typeof raw?.data === 'string') {
+            result = raw.data;
         } else if (raw && typeof raw === 'object') {
             const str = JSON.stringify(raw);
             console.warn('[Summaryception][Connection] Unexpected return type from sendRequest:', str.substring(0, 500));
@@ -253,7 +297,7 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt) {
         return result;
 
     } catch (error) {
-        if (error instanceof ConnectionError) throw error;
+        if (error instanceof ConnectionError || error.name === 'AbortError' || settings.requestSignal?.aborted) throw error;
 
         const msg = error?.message || String(error);
         const status = error?.status || error?.response?.status;
@@ -267,7 +311,7 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt) {
             );
         }
 
-        if (msg.includes('not found') || msg.includes('profile')) {
+        if (status === 404 || /not found|invalid profile|no profile/i.test(msg)) {
             throw new ConnectionError(
                 `Connection Profile "${profileId}" not found. It may have been deleted. ` +
                 `Please re-select a profile in Summaryception settings.`,
@@ -288,7 +332,7 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt) {
  * Send a request to a local Ollama instance using /api/chat.
  * Routes through ST's CORS proxy to avoid browser CORS restrictions.
  */
-async function sendViaOllama(url, model, systemPrompt, userPrompt) {
+async function sendViaOllama(url, model, systemPrompt, userPrompt, settings = {}) {
     if (!url) {
         throw new ConnectionError(
             'Ollama URL is not configured. Please set it in Summaryception settings.',
@@ -308,7 +352,7 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt) {
     let response;
     try {
         response = await fetch(proxiedUrl(targetUrl), {
-            method: 'POST',
+            method: 'POST', signal: settings.requestSignal,
             headers: {
                 ...getProxyHeaders(),
                                'Content-Type': 'application/json',
@@ -321,15 +365,18 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt) {
                 ],
                 stream: false,
                 options: {
-                    temperature: LLM_DEFAULTS.ollamaTemperature,
+                    temperature: Number(settings.summarizerTemperature ?? LLM_DEFAULTS.ollamaTemperature),
+                    ...(settings.summarizerResponseLength > 0 ? { num_predict: settings.summarizerResponseLength } : {}),
+                    ...(settings.summarizerStopSequences?.length ? { stop: settings.summarizerStopSequences } : {}),
                 },
             }),
         });
     } catch (proxyError) {
+        if (settings.requestSignal?.aborted || proxyError.name === 'AbortError') throw proxyError;
         console.warn(`${MODULE_NAME} CORS proxy failed, trying direct:`, proxyError.message);
         try {
             response = await fetch(targetUrl, {
-                method: 'POST',
+                method: 'POST', signal: settings.requestSignal,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     model: model,
@@ -338,10 +385,13 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt) {
                         { role: 'user', content: userPrompt },
                     ],
                     stream: false,
-                    options: { temperature: LLM_DEFAULTS.ollamaTemperature },
+                    options: { temperature: Number(settings.summarizerTemperature ?? LLM_DEFAULTS.ollamaTemperature),
+                    ...(settings.summarizerResponseLength > 0 ? { num_predict: settings.summarizerResponseLength } : {}),
+                    ...(settings.summarizerStopSequences?.length ? { stop: settings.summarizerStopSequences } : {}) },
                 }),
             });
         } catch (directError) {
+            if (settings.requestSignal?.aborted || directError.name === 'AbortError') throw directError;
             throw new ConnectionError(
                 `Failed to connect to Ollama at ${baseUrl}. ` +
                 `CORS proxy error: ${proxyError.message}. Direct error: ${directError.message}. ` +
@@ -355,11 +405,14 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt) {
         const errorText = await response.text().catch(() => 'Unknown error');
         throw new ConnectionError(
             `Ollama request failed (${response.status}): ${errorText}`,
-                                  { retryable: response.status >= 500, status: response.status }
+                                  { retryable: response.status >= 500 || response.status === 429, status: response.status, retryAfter: response.headers.get('retry-after') }
         );
     }
 
     const data = await response.json();
+    if (data?.choices?.[0]?.finish_reason === 'length' || data?.done_reason === 'length' || data?.done === false) {
+        throw new ConnectionError('Summarizer output was truncated. Increase the response token limit.', { retryable: false });
+    }
 
     if (!data?.message?.content) {
         throw new ConnectionError(
@@ -492,19 +545,21 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
     let response;
     try {
         response = await fetch(proxiedUrl(endpoint), {
-            method: 'POST',
+            method: 'POST', signal: settings.requestSignal,
             headers: { ...getProxyHeaders(), ...headers },
             body: body,
         });
     } catch (proxyError) {
+        if (settings.requestSignal?.aborted || proxyError.name === 'AbortError') throw proxyError;
         console.warn(`${MODULE_NAME} CORS proxy failed for OpenAI endpoint, trying direct:`, proxyError.message);
         try {
             response = await fetch(endpoint, {
-                method: 'POST',
+                method: 'POST', signal: settings.requestSignal,
                 headers: headers,
                 body: body,
             });
         } catch (directError) {
+            if (settings.requestSignal?.aborted || directError.name === 'AbortError') throw directError;
             throw new ConnectionError(
                 `Failed to connect to ${baseUrl}. ` +
                 `Enable the CORS proxy in config.yaml (enableCorsProxy: true). ` +
@@ -530,57 +585,59 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
         }
         throw new ConnectionError(
             `OpenAI Compatible request failed (${response.status}): ${errorText}`,
-                                  { retryable: response.status >= 500 || response.status === 429, status: response.status }
+                                  { retryable: response.status >= 500 || response.status === 429, status: response.status, retryAfter: response.headers.get('retry-after') }
         );
     }
 
-    // ─── Stream reading ──────────────────────────────────────────
-    // Read SSE chunks and assemble the full response content.
+    if (/application\/json/i.test(response.headers.get('content-type') || '')) {
+        const data = await response.json();
+        const choice = data.choices?.[0];
+        if (data.error || choice?.finish_reason === 'length') {
+            throw new ConnectionError(data.error?.message || 'Summarizer output was truncated. Increase the response token limit.', { retryable: false });
+        }
+        if (typeof choice?.message?.content !== 'string' || !choice.message.content.trim()) {
+            throw new ConnectionError('OpenAI Compatible endpoint returned empty content.', { retryable: true });
+        }
+        return choice.message.content;
+    }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    let fullContent = '';
-    let buffer = '';
-
+    let fullContent = '', buffer = '', completed = false;
+    const processLine = line => {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) return;
+        const data = trimmed.slice(5).trim();
+        if (data === '[DONE]') { completed = true; return; }
+        let parsed;
+        try { parsed = JSON.parse(data); }
+        catch { throw new ConnectionError('Malformed summarizer stream frame.', { retryable: true }); }
+        if (parsed.error) throw new ConnectionError(parsed.error.message || 'Streaming API error.', { retryable: false });
+        const choice = parsed.choices?.[0];
+        if (choice?.finish_reason === 'length') {
+            throw new ConnectionError('Summarizer output was truncated. Increase the response token limit.', { retryable: false });
+        }
+        if (choice?.finish_reason) completed = true;
+        if (typeof choice?.delta?.content === 'string') fullContent += choice.delta.content;
+    };
     try {
         while (true) {
+            settings.requestSignal?.throwIfAborted();
             const { done, value } = await reader.read();
             if (done) break;
-
             buffer += decoder.decode(value, { stream: true });
-
-            // Process complete SSE lines
             const lines = buffer.split('\n');
-            // Keep the last potentially incomplete line in the buffer
             buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed || !trimmed.startsWith('data:')) continue;
-
-                const data = trimmed.slice(5).trim();
-                if (data === '[DONE]') continue;
-
-                try {
-                    const parsed = JSON.parse(data);
-                    const delta = parsed.choices?.[0]?.delta?.content;
-                    if (delta) {
-                        fullContent += delta;
-                    }
-                } catch (e) {
-                    // Skip unparseable chunks (comments, keep-alive, etc.)
-                }
-            }
+            for (const line of lines) processLine(line);
+            if (completed) break;
         }
+        buffer += decoder.decode();
+        if (!completed && buffer.trim()) processLine(buffer);
+        if (!completed) throw new ConnectionError('Summarizer stream ended before completion.', { retryable: true });
     } finally {
+        await reader.cancel().catch(() => {});
         reader.releaseLock();
     }
-
-    if (!fullContent.trim()) {
-        throw new ConnectionError(
-            'OpenAI Compatible endpoint returned an empty response (streaming).',
-                                  { retryable: true }
-        );
-    }
+    if (!fullContent.trim()) throw new ConnectionError('OpenAI Compatible endpoint returned an empty response.', { retryable: true });
 
     return fullContent;
 }
@@ -594,14 +651,9 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
  */
 export async function testOpenAIConnection(url, apiKey, model) {
     try {
-        const result = await sendViaOpenAI(
-            url,
-            apiKey,
-            model || 'test',
-            'You are a test assistant.',
-            'Respond with exactly: CONNECTION_OK',
-            LLM_DEFAULTS.testMaxTokens
-        );
+        const result = await sendSummarizerRequest({ connectionSource: 'openai', openaiUrl: url,
+            openaiKey: apiKey, openaiModel: model || 'test', openaiMaxTokens: LLM_DEFAULTS.testMaxTokens },
+            'You are a test assistant.', 'Respond with exactly: CONNECTION_OK');
         return {
             success: true,
             message: `Connection successful! Response: "${result.substring(0, LLM_DEFAULTS.testPreviewLength)}"`,
@@ -625,6 +677,8 @@ export async function testOpenAIConnection(url, apiKey, model) {
  * FORK NOTE: This is the KoboldCPP direct mode added in this fork.
  * Search "Mode 5" to find it when merging upstream updates.
  */
+const koboldContextCache = new Map();
+
 async function sendViaKoboldCPP(url, instructPrefix, instructSuffix, systemPrompt, userPrompt, settings = {}) {
     if (!url) {
         throw new Error('KoboldCPP URL is not configured. Please set it in Summaryception settings.');
@@ -635,19 +689,28 @@ async function sendViaKoboldCPP(url, instructPrefix, instructSuffix, systemPromp
     const suffix = (instructSuffix ?? '<|im_end|>\n<|im_start|>assistant\n').replace(/\\n/g, '\n');
     const fullPrompt = `${prefix}${systemPrompt}\n\n${userPrompt}${suffix}`;
 
-    // Detect KoboldCPP's actual loaded context size so we don't exceed it
-    let maxCtx = 4096;
-    try {
-        const cfgRes = await fetch(`${baseUrl}/api/v1/config/max_context_length`);
-        if (cfgRes.ok) maxCtx = (await cfgRes.json()).value ?? maxCtx;
-    } catch { /* use default */ }
+    // Cache briefly: refresh after a model reload without a GET on every batch.
+    const cached = koboldContextCache.get(baseUrl);
+    let maxCtx = cached && Date.now() - cached.at < 60000 ? cached.value : 4096;
+    if (!cached || Date.now() - cached.at >= 60000) {
+        try {
+            const cfgRes = await fetch(`${baseUrl}/api/v1/config/max_context_length`, { signal: settings.requestSignal });
+            if (cfgRes.ok) {
+                const value = Number((await cfgRes.json()).value);
+                if (Number.isFinite(value) && value > 0) maxCtx = value;
+            }
+            koboldContextCache.set(baseUrl, { value: maxCtx, at: Date.now() });
+        } catch (error) {
+            if (settings.requestSignal?.aborted) throw error;
+        }
+    }
 
     const response = await fetch(`${baseUrl}/v1/completions`, {
-        method: 'POST',
+        method: 'POST', signal: settings.requestSignal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             prompt:             fullPrompt,
-            max_tokens:         settings.openaiMaxTokens || 2000,
+            max_tokens:         settings.summarizerResponseLength || settings.openaiMaxTokens || 512,
             max_context_length: maxCtx,
             temperature:        Number(settings.summarizerTemperature ?? 0.3),
             top_p:              0.9,
@@ -660,10 +723,13 @@ async function sendViaKoboldCPP(url, instructPrefix, instructSuffix, systemPromp
 
     if (!response.ok) {
         const errorText = await response.text().catch(() => 'Unknown error');
-        throw new Error(`KoboldCPP request failed (${response.status}): ${errorText}`);
+        throw new ConnectionError(`KoboldCPP request failed (${response.status}): ${errorText}`, { retryable: response.status >= 500 || response.status === 429, status: response.status, retryAfter: response.headers.get('retry-after') });
     }
 
     const data = await response.json();
+    if (data?.choices?.[0]?.finish_reason === 'length' || data?.done_reason === 'length' || data?.done === false) {
+        throw new ConnectionError('Summarizer output was truncated. Increase the response token limit.', { retryable: false });
+    }
     const text = data?.choices?.[0]?.text ?? '';
 
     if (!text.trim()) {
@@ -691,17 +757,20 @@ async function sendViaCompletion(settings, systemPrompt, userPrompt) {
     };
     if (settings.completionModel) body.model = settings.completionModel;
     if (settings.summarizerStopSequences?.length) body.stop = settings.summarizerStopSequences;
-    const response = await fetch(settings.completionUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+    const response = await fetch(settings.completionUrl, { method: 'POST', signal: settings.requestSignal, headers, body: JSON.stringify(body) });
     if (!response.ok) {
         const errorText = await response.text().catch(() => 'Unknown error');
         throw new ConnectionError(`Completion API request failed (${response.status}): ${errorText}`, {
             retryable: response.status >= 500 || response.status === 429,
-            status: response.status,
+            status: response.status, retryAfter: response.headers.get('retry-after'),
         });
     }
     const data = await response.json();
+    if (data?.choices?.[0]?.finish_reason === 'length' || data?.done_reason === 'length' || data?.done === false) {
+        throw new ConnectionError('Summarizer output was truncated. Increase the response token limit.', { retryable: false });
+    }
     const text = data?.choices?.[0]?.text ?? data?.content ?? data?.response ?? data?.text ?? '';
-    if (!String(text).trim()) {
+    if (typeof text !== 'string' || !text.trim()) {
         throw new ConnectionError('Completion API returned an empty response.', { retryable: true });
     }
     return String(text).trim();
@@ -745,17 +814,20 @@ async function sendViaCustomHttp(settings, systemPrompt, userPrompt) {
     } catch (error) {
         throw new ConnectionError(`Custom HTTP JSON template is invalid: ${error.message}`, { retryable: false });
     }
-    const response = await fetch(settings.customUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+    const response = await fetch(settings.customUrl, { method: 'POST', signal: settings.requestSignal, headers, body: JSON.stringify(body) });
     if (!response.ok) {
         const errorText = await response.text().catch(() => 'Unknown error');
         throw new ConnectionError(`Custom HTTP request failed (${response.status}): ${errorText}`, {
             retryable: response.status >= 500 || response.status === 429,
-            status: response.status,
+            status: response.status, retryAfter: response.headers.get('retry-after'),
         });
     }
     const data = await response.json();
-    const value = getPathValue(data, settings.customResponsePath) ?? data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? data?.response ?? data?.content;
-    if (!String(value || '').trim()) {
+    if (data?.choices?.[0]?.finish_reason === 'length' || data?.done_reason === 'length' || data?.done === false) {
+        throw new ConnectionError('Summarizer output was truncated. Increase the response token limit.', { retryable: false });
+    }
+    const value = settings.customResponsePath ? getPathValue(data, settings.customResponsePath) : (data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? data?.response ?? data?.content);
+    if (typeof value !== 'string' || !value.trim()) {
         throw new ConnectionError('Custom HTTP response path returned empty content.', { retryable: true });
     }
     return String(value).trim();

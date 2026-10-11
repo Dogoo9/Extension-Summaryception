@@ -1,0 +1,7 @@
+{
+  "name": "summaryception-extension",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test --test-isolation=none tests/*.test.js" },
+  "devDependencies": { "jquery": "^3.7.1", "jsdom": "^26.1.0" }
+}

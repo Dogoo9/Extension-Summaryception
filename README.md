@@ -4,9 +4,9 @@ This fork tracks [Lodactio's upstream Summaryception](https://github.com/Lodacti
 
 ### Layered Recursive Memory for SillyTavern
 
-> Your AI remembers **thousands of turns** in under **20k tokens**. No context bloat. No lost plot threads. No compromises.
+> Layered narrative memory with a configurable context budget and optional structured fact tracking. Compression is lossy; continuity depends on the model, prompts, and budget.
 
-Summaryception is a non-destructive, context-aware memory system for [SillyTavern](https://github.com/SillyTavern/SillyTavern) that replaces brute-force context stuffing with intelligent layered summarization. It keeps your most recent turns verbatim while compressing older conversation into ultra-compact summary snippets — organized in recursive layers that scale indefinitely.
+Summaryception is a non-destructive, context-aware memory system for [SillyTavern](https://github.com/SillyTavern/SillyTavern) that replaces brute-force context stuffing with intelligent layered summarization. It keeps your most recent turns verbatim while compressing older conversation into ultra-compact summary snippets — organized in recursive layers with configurable depth and injection limits.
 
 ---
 
@@ -24,17 +24,17 @@ The conventional wisdom — *"keep more raw turns"* — is a band-aid for bad co
 
 ## 💡 The Solution
 
-Summaryception flips the approach: **compress aggressively, lose nothing.**
+Summaryception compresses older prose into concise narrative deltas. Repeated compression can lose detail; original chat messages remain available for review and rebuilding.
 
-A context-aware summarizer prompt examines each batch of turns against what's *already been summarized*, outputting only the **narrative delta** — new plot points, state changes, character decisions. Nothing repeated, nothing lost.
+A context-aware summarizer prompt examines each batch of turns against what's *already been summarized*, outputting only the **narrative delta** — new plot points, state changes, character decisions. The aim is less repetition while retaining useful changes; this is not a guarantee of complete recall.
 
 **Real example** — 3 turns, ~5,200 raw tokens, compressed to:
 
 > *Alina kisses Lodactio; he reciprocates; she grows to human size, straddling him; she squeezes his crotch and intends to undo his pants.*
 
-**27 tokens. 125:1 compression. Every plot-relevant beat preserved.**
+This illustrates the compact format. Token counts and retained details vary by tokenizer and summarizer; compression ratios do not establish recall accuracy.
 
-And because each snippet is written with knowledge of all previous snippets, they get *more efficient over time* — the summarizer doesn't re-establish characters, settings, or relationships that are already recorded. Early snippets might be 40 tokens. By snippet 10, you're seeing 15-token summaries.
+Because each snippet receives a budgeted selection of previous snippets, it can avoid some repetition over time — the summarizer doesn't re-establish characters, settings, or relationships that are already recorded. Early snippets might be 40 tokens. By snippet 10, you're seeing 15-token summaries.
 
 ---
 
@@ -66,7 +66,7 @@ YOUR CHAT (e.g., 200 turns)
 │  └──────────────────────────────────────────┘
 │
 │  Total context: ~12k tokens
-│  Total narrative coverage: EVERYTHING
+│  Narrative coverage: compressed, with possible losses
 ```
 
 ### The "Ception" — Recursive Layer Promotion
@@ -77,7 +77,7 @@ When a layer fills up (default: 30 snippets), the oldest snippets are promoted t
 2. **Subsequent promotions** — Additional overflow snippets (default: 3 at a time) are summarized together against the destination layer's existing content (including the seed) as prior context.
 3. **Cascade** — If the destination layer also fills up, the process repeats, creating Layer 2, Layer 3, etc.
 
-Each layer multiplies the turn coverage per snippet while maintaining coherent narrative continuity.
+Each layer increases the turn range represented by a snippet, at the cost of another lossy summarization pass. Promotions retain source ranges so edited or branched histories can be repaired.
 
 ---
 
@@ -97,9 +97,9 @@ Each promotion merges 3 snippets into 1, so each layer multiplies turn coverage 
 | Layer 2 | 30 | 27 | 810 | ~2,100 |
 | Layer 3 | 30 | 81 | 2,430 | ~2,100 |
 | Layer 4 | 30 | 243 | 7,290 | ~2,100 |
-| **Total** | — | — | **~10,900 turns** | **~17,500 tokens** |
+| **Total** | — | — | **~10,900 represented turns** | **~17,500 tokens** |
 
-> **Nearly 11,000 turns of narrative history in ~18k tokens.**
+> Theoretical represented ranges, not measured detail retention. The configured injection budget may omit stored snippets or facts.
 
 ### Conservative Estimate (smaller snippets at deeper layers)
 
@@ -115,9 +115,9 @@ In practice, deeper layers produce shorter snippets as they compress already-com
 | Layer 4 | 30 | 243 | ~40 | ~1,200 |
 | **Total** | — | — | — | **~16,000 tokens** |
 
-> **~11,000 turns in ~16k tokens.** The raw conversation? Roughly **15–25 million tokens.** That's a compression ratio approaching **1,000:1**.
+> These figures are illustrative capacity estimates rather than measured continuity results. The raw conversation? Roughly **15–25 million tokens.** That's a compression ratio approaching **1,000:1**.
 
-For comparison, most roleplayers hit 17,500 tokens by **turn 10** with verbatim context. Summaryception uses the same budget to remember **eleven thousand**.
+Actual context use depends on passage length, selected memories, tokenizer, wrappers, and the active SillyTavern preset.
 
 ---
 
@@ -131,14 +131,11 @@ Summaryception never deletes your messages. Summarized turns are **ghosted** —
 
 ---
 
-## 🧹 Clean Prompt Isolation
+## 🧹 Summarizer Prompt Isolation
 
-When Summaryception calls the summarizer, it **temporarily disables all Chat Completion preset toggles** — your creative writing prompts, character instructions, scenario text, everything. The summarizer sees only its own system prompt and the passage to summarize.
+Direct HTTP sources send only the summary prompts. Default uses SillyTavern's raw generation path; if a prompt manager is exposed, its toggles are restored after the request. Connection Profile requests use the supported numeric token-limit argument and disable creative preset/instruct formatting while retaining the profile's endpoint, model, and credentials.
 
-This means:
-- ✅ No 4k tokens of story-writing instructions competing with a 200-token summarization task
-- ✅ Budget models perform like premium models on the focused extraction task
-- ✅ Your preset is restored instantly after, whether the call succeeds or fails
+Stop and timeouts abort direct HTTP and profile requests. Default mode uses SillyTavern's native generation-stop event, which can also cancel concurrent raw generation from other extensions. Avoid overlapping background raw generations on that source.
 
 ---
 
@@ -149,18 +146,18 @@ This is the core innovation. The summarizer prompt receives:
 | Variable | Contents |
 |---|---|
 | `{{player_name}}` | Your active persona name |
-| `{{context_str}}` | **That layer's existing summaries** — everything already recorded |
+| `{{context_str}}` | **Budgeted existing summaries** — everything already recorded |
 | `{{story_txt}}` | The new passage to summarize |
 
 The instruction: *"Summarize only necessary elements to coherently continue the Prior Context. Exclude anything already covered."*
 
-This means:
+Possible behavior (model-dependent):
 - **Snippet 1** has to establish characters, setting, relationships (~80–100 tokens)
 - **Snippet 5** only records new events — characters and setting are established (~50–70 tokens)
 - **Snippet 10** is pure narrative delta — just what changed (~30–50 tokens)
 - **Layer promotions** work the same way — each deeper layer summarizes against its own existing content
 
-Every summary is a **minimal diff**, not a redundant recap.
+The prompt requests a compact delta; models can still omit facts, repeat content, or make mistakes.
 
 ---
 
@@ -244,12 +241,12 @@ Summaryception can use different backends for summarization, independent of your
 | **Default** | Uses SillyTavern's active connection — simplest setup |
 | **OpenAI Compatible** | Direct endpoint with URL, API key, and model — bypasses all ST formatting |
 | **Ollama** | Local Ollama instance with model browser |
-| **Connection Profile** | Uses an ST Connection Profile (⚠️ inherits preset formatting — may degrade summary quality) |
+| **Connection Profile** | Uses the profile endpoint/model/auth with preset and instruct formatting disabled |
 | **KoboldCPP** | Direct `/v1/completions` access with configurable instruct prefix and suffix |
 | **Completion API** | Generic completion endpoint with API key, model, and prompt wrappers |
 | **Custom HTTP JSON** | User-defined headers, request-body template, and response JSON path |
 
-> 💡 **Recommended:** Use **Default** or **OpenAI Compatible** for cleanest results. Connection Profiles inject preset formatting into summary requests, which can cause the model to roleplay instead of summarize.
+> Use the same local model if GPU residency is limited. Direct sources support request-specific cancellation; choose a response limit large enough to finish extraction, especially for reasoning models.
 
 Fork connection settings can be saved as named profiles, updated, duplicated, and restored independently of SillyTavern's own Connection Profiles. Direct-source temperature, timeout, and stop-sequence controls are saved with each profile.
 
@@ -260,12 +257,14 @@ Fork connection settings can be saved as named profiles, updated, duplicated, an
 - **Layer Stats** — Live view of snippet counts per layer, active character-card bank, and ghosted message count
 - **Injection Preview** — See exactly what gets sent to the LLM
 - **Injection Inspector** — Verify the registered position, depth, role, and injected text
-- **Snippet Browser** — Browse, edit, regenerate, and delete individual snippets across all layers
+- **Snippet Browser** — Browse, edit, and regenerate narrative snippets. Deletion rolls back dependent later memory and restores original messages for rebuilding.
 - **Memory Database Viewer** — Search and inspect every character bank, edit or delete snippets, export a bank, and inspect its raw JSON
 - **Export/Import** — Save and restore the active memory bank as JSON
-- **Force Summarize** — Manually trigger summarization
+- **Force Summarize** — Manually trigger summarization; automatic/backlog processing preserves the verbatim window, while explicit single-batch force can summarize within it
 - **Stop** — Abort any running summarization, progress saved
-- **Repair** — Find and fix orphaned hidden messages
+- **Repair** — Repair Summaryception-owned visibility while preserving manually hidden messages
+- **Saved Custom Prompts** — Save, load, delete, import, and export prompt text
+- **Reset to Defaults** — Reset settings while preserving chat memory and saved profiles/prompts
 - **Slash Commands** — `/sc-status`, `/sc-preview`, `/sc-db`, `/sc-clear`
 
 ---
@@ -291,17 +290,21 @@ Restart SillyTavern and enable the extension.
 
 ---
 
-## 🧠 Why This Works Better
+## 🧭 Optional Structured State
 
-| | Traditional Summary | Summaryception |
-|---|---|---|
-| **Compression** | ~10:1, lossy | ~125:1 per snippet, lossless |
-| **Context at turn 100** | 30k+ tokens or truncated | ~10k tokens |
-| **Context at turn 1,000** | Impossible without truncation | ~13k tokens |
-| **Context at turn 10,000** | Literally impossible | ~16k tokens |
-| **Lost information** | Lots — hedged by keeping more raw turns | None — every state change is tracked |
-| **Coherence over time** | Degrades as context grows | Stable indefinitely |
-| **Works with budget models** | Poorly — needs powerful summarizer | Excellently — prompt does the heavy lifting |
+Enable **Track facts alongside narrative summaries** to maintain a versioned snapshot per memory bank. The same batch call returns a narrative summary and explicit fact updates/removals. No extra model or extraction call per turn is introduced. Promotions only compress narrative layers; they cannot overwrite the newer snapshot.
+
+Facts cover location/time, present characters, relationships, important item ownership, injuries, goals, and durable information. Each fact has a stable ID and original-message source range. Missing facts are retained until explicitly removed. Complete JSON and all changes must validate before the narrative/state are committed together and source messages are hidden. Schema validation cannot establish factual truth; inspect snapshots and correct mistakes.
+
+State starts at the next batch when enabled. **Rebuild Active Memory** includes older original messages by clearing and replaying the active bank; export first if you want a backup. The feature is **off by default** and leaves custom text-only prompts usable. When enabling after text-only batches, the new snapshot has partial coverage; the UI and injection label its starting point and cutoff. Visible later messages take precedence.
+
+Use **Pin Correction** to lock a fact, **Remove & Lock** to lock its absence, and **Unlock** to resume model updates. Corrections are anchored to the latest message. Edits, swipes, deletions, and branches invalidate affected memory across all banks, including inactive cards. Up to twelve state checkpoints are retained; when promotion or older edits prevent a safe aligned rollback, the affected bank is reset for rebuilding from original messages. Changes to a correction's source history remove that correction too.
+
+The state allowance defaults to **600 tokens**, adjustable from **400–800**, inside the total memory injection budget. Wrappers and labels count toward that total. Selection retains whole facts/snippets, keeps omitted content in storage, and reports overflow in the inspector. SillyTavern's available async tokenizer is measured before generation; previews can use the explicitly labeled four-characters-per-token fallback. Other extensions can still alter the final prompt/context allocation.
+
+Response JSON is larger than a plain summary. Increasing the response token limit may be necessary, and extraction can take longer even with the same number of calls. Briefly cached KoboldCPP context lookups, cached source fingerprints, bounded prior context, and removal of redundant/restarted processing reduce avoidable work. Deterministic serialization does **not** guarantee KV-cache hits or a measured end-to-end speedup.
+
+See [implementation and evaluation](docs/structured-state-plan.md) for test coverage, limitations, and a fixed on/off replay experiment. No real-model accuracy or latency gain has been measured yet.
 
 ---
 
