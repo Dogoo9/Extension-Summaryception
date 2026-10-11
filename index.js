@@ -17,7 +17,7 @@ import {
     getConnectionDisplayName,
 } from './connectionutil.js';
 import {
-    emptyState, validateStoredState, effectiveFacts, stateInstructions, parseStateResponse,
+    emptyState, validateStoredState, effectiveFacts, stateInstructions, parseStateResponse, factInstructions, parseFactResponse,
     rollbackState, correctState, messageSignature, firstSourceChange,
 } from './state-memory.js';
 import { createMeter, assembleBudgetedMemory, assembleBudgetedMemoryAsync } from './memory-budget.js';
@@ -841,6 +841,7 @@ async function activateCharacterMemoryStore() {
         await ghostMessagesUpTo(store.summarizedUpTo, getSummarizedRangeStart(store), target);
     }
     displayedMemoryBank = { chat: target.chat, store };
+    scheduleFactBackfill();
 }
 
 async function saveChatStore() {
@@ -999,6 +1000,7 @@ function truncateMemoryStore(store, dirty) {
     store.ghostedIndices = store.ghostedIndices.filter(i => i <= store.summarizedUpTo);
     invalidateContextCache(store);
     if (store.lastBatch?.range?.[1] >= dirty) delete store.lastBatch;
+    if (store.lastFactBatch?.range?.[1] >= dirty) delete store.lastFactBatch;
 }
 
 function restoreUncoveredGhosts() {
@@ -1259,6 +1261,9 @@ let currentAbortController = null;
 let activeRun = null;
 let chatEpoch = 0;
 let catchupDialogClose = null;
+let factBackfillTimer = null;
+let pendingFactBackfill = null;
+const factBackfillAttempts = new WeakMap();
 
 function captureMemoryTarget() {
     const ctx = SillyTavern.getContext();
@@ -1301,9 +1306,15 @@ function finishSummarization(run) {
     activeRun = null;
     currentAbortController = null;
     isSummarizing = false;
+    if (pendingFactBackfill) queueFactBackfill();
+    if (!run.controller.signal.aborted && targetIsCurrent(run.pendingSummaryTarget)) {
+        onMessageReceived(run.pendingSummaryMessageIndex);
+    }
 }
 
 function abortSummarization() {
+    clearTimeout(factBackfillTimer);
+    pendingFactBackfill = null;
     currentAbortController?.abort();
     catchupDialogClose?.();
     // Keep the run locked until its finally block, including promotion/catchup.
@@ -1324,12 +1335,13 @@ function delayWithSignal(ms, signal) {
 
 // ─── Core: LLM Summarization with Retry ──────────────────────────────
 
-async function callSummarizer(storyTxt, contextStr, extraInstructions = '', structured = false) {
+async function callSummarizer(storyTxt, contextStr, extraInstructions = '', structured = false, factsOnly = false) {
     const s = structuredClone(getSettings());
     const variables = { player_name: getPlayerName(), context_str: contextStr || '(none yet)', story_txt: storyTxt };
-    const prompt = s.summarizerUserPrompt.replace(/{{(player_name|context_str|story_txt)}}/g, (_, key) => variables[key])
+    const prompt = (factsOnly ? `Extract supported facts from this original RP passage:\n${storyTxt}`
+        : s.summarizerUserPrompt.replace(/{{(player_name|context_str|story_txt)}}/g, (_, key) => variables[key]))
         + (extraInstructions ? `\n\n${extraInstructions}` : '');
-    const systemPrompt = s.summarizerSystemPrompt + (structured
+    const systemPrompt = factsOnly ? 'You maintain factual RP memory. Use only the supplied original passage and validated snapshot. Return the requested complete JSON object, with no commentary.' : s.summarizerSystemPrompt + (structured
         ? '\nReturn the complete JSON summary/stateChanges object required below, without commentary.' : '');
     const defaultMode = !s.connectionSource || s.connectionSource === 'default';
     const snapshot = defaultMode ? snapshotPromptToggles() : null;
@@ -1388,6 +1400,118 @@ function unsummarizedTurns(chat, store) {
         && !(chat[turn.index].is_hidden && !chat[turn.index].extra?.sc_ghosted));
 }
 
+function needsFactBackfill(store) {
+    return store.summarizedUpTo >= 0 && (store.structuredState.from > 0
+        || store.structuredState.through < store.summarizedUpTo);
+}
+
+function factBackfillKey(store) {
+    return `${store.summarizedUpTo}/${store.structuredState.through}/${store.structuredState.from}/${storeRevisions.get(store) || 0}`;
+}
+
+// Debounce chat/card activation and enable events. A busy run drains the queued
+// request in its finally block; failed extraction is not retried on every render.
+function scheduleFactBackfill(force = false) {
+    const s = getSettings();
+    if (!s.enabled || !s.structuredStateEnabled || s.pauseSummarization) return;
+    const target = captureMemoryTarget();
+    if (!needsFactBackfill(target.store)) return;
+    pendingFactBackfill = { target, force: force || Boolean(pendingFactBackfill?.force) };
+    queueFactBackfill();
+}
+
+function queueFactBackfill() {
+    clearTimeout(factBackfillTimer);
+    factBackfillTimer = setTimeout(async () => {
+        factBackfillTimer = null;
+        if (isSummarizing) return;
+        const queued = pendingFactBackfill;
+        pendingFactBackfill = null;
+        const s = getSettings();
+        if (!queued || !targetIsCurrent(queued.target) || !s.enabled || !s.structuredStateEnabled || s.pauseSummarization) return;
+        if (!queued.force && factBackfillAttempts.get(queued.target.store) === factBackfillKey(queued.target.store)) return;
+        await extractMissingFacts();
+    }, 100);
+}
+
+async function extractMissingFacts() {
+    const s = getSettings();
+    if (!s.enabled || !s.structuredStateEnabled || s.pauseSummarization || isSummarizing) return false;
+    const run = beginSummarization();
+    if (!run) return false;
+    try {
+        reconcileMemorySources();
+        if (!runIsCurrent(run)) return false;
+        return await backfillStructuredState(run);
+    } catch (error) {
+        toastr.error(`Fact catch-up paused: ${error.message}. Existing narrative kept.`, 'Summaryception');
+        return false;
+    } finally {
+        factBackfillAttempts.set(run.target.store, factBackfillKey(run.target.store));
+        finishSummarization(run);
+        updateInjection(); updateUI();
+    }
+}
+
+async function backfillStructuredState(run) {
+    if (!runIsCurrent(run) || !getSettings().structuredStateEnabled) return false;
+    const { chat, store } = run.target;
+    if (!needsFactBackfill(store)) return true;
+    // Old partial snapshots missed earlier facts. Replay locally from zero, but
+    // replace stored state only after a valid response; keep manual locks.
+    let state = store.structuredState.from > 0
+        ? { ...emptyState(), overrides: structuredClone(store.structuredState.overrides) } : store.structuredState;
+    const cutoff = store.summarizedUpTo;
+    const batchSize = Math.max(1, Math.floor(Number(getSettings().turnsPerSummary) || 3));
+    const turns = getAssistantTurns(chat).filter(turn => turn.index > state.through && turn.index <= cutoff);
+    let turnOffset = 0;
+    let completed = 0;
+    const toast = toastr.info(`Extracting missing facts through message ${cutoff}…`, 'Summaryception', {
+        timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true, onCloseClick: abortSummarization,
+    });
+    run.factProgress = { through: state.through, cutoff };
+    updateUI();
+    try {
+        while (state.through < cutoff && runIsCurrent(run)) {
+            const start = state.through + 1;
+            const end = turns.length - turnOffset > batchSize ? turns[turnOffset + batchSize - 1].index : cutoff;
+            turnOffset += batchSize;
+            const range = [start, end];
+            const transaction = captureTransaction(run.target, end);
+            const passage = buildPassageFromRange(chat, start, end, true);
+            const started = performance.now();
+            const result = passage.trim()
+                ? await callSummarizer(passage, '', factInstructions(state, range), true, true)
+                : '{"stateChanges":[]}';
+            if (!result || !runIsCurrent(run) || !transactionIsCurrent(transaction)) return false;
+            let next;
+            try { next = parseFactResponse(result, state, range); }
+            catch (error) {
+                toastr.error(`${error.message}. Fact catch-up paused; use Extract Missing Facts to retry. Existing narrative kept.`, 'Summaryception');
+                return false;
+            }
+            store.structuredState = next;
+            for (let i = 0; i <= end; i++) store.sourceSignatures[i] = transaction.signatures[i];
+            store.lastFactBatch = { milliseconds: Math.round(performance.now() - started), range };
+            invalidateContextCache(store);
+            state = next;
+            completed++;
+            run.factProgress.through = end;
+            await saveChatStore();
+            if (!runIsCurrent(run)) return false;
+            $(toast).find('.toast-message').text(`Extracting facts: message ${end} / ${cutoff} — click × to stop`);
+            updateInjection(); updateUI();
+            await delayWithSignal(TUNING.catchupInterBatchDelay, run.controller.signal);
+        }
+        if (!runIsCurrent(run)) return false;
+        toastr.success(`Fact catch-up complete: ${completed} batches, ${effectiveFacts(state).length} facts.`, 'Summaryception');
+        return true;
+    } finally {
+        delete run.factProgress;
+        clearPersistentToast(toast);
+    }
+}
+
 async function maybeSummarizeTurns() {
     const s = getSettings();
     if (!s.enabled || s.pauseSummarization || isSummarizing) return;
@@ -1431,6 +1555,10 @@ async function summarizeOneBatch(visibleTurns) {
 }
 
 async function summarizeOneBatchFromTurns(visibleTurns, run = activeRun) {
+    if (!runIsCurrent(run)) return false;
+    // A snapshot must first include existing summarized originals, including
+    // text-only batches created while tracking was disabled.
+    if (getSettings().structuredStateEnabled && !await backfillStructuredState(run)) return false;
     if (!runIsCurrent(run)) return false;
     const { chat, store } = run.target;
     const s = getSettings();
@@ -1766,6 +1894,11 @@ function onMessageReceived(messageIndex) {
             clearTimeout(messageReceivedTimer);
             messageReceivedTimer = setTimeout(async () => {
                 if (!targetIsCurrent(target)) return;
+                if (isSummarizing) {
+                    activeRun.pendingSummaryTarget = target;
+                    activeRun.pendingSummaryMessageIndex = messageIndex;
+                    return;
+                }
                 await maybeSummarizeTurns();
                 updateInjection();
                 updateUI();
@@ -1821,6 +1954,7 @@ function onSourceMessageChanged(index) {
     }
     updateInjection();
     updateUI();
+    scheduleFactBackfill();
 }
 
 // ─── Slash Commands ──────────────────────────────────────────────────
@@ -2690,6 +2824,7 @@ async function clearActiveMemory() {
     store.structuredState = emptyState();
     store.sourceSignatures = [];
     delete store.lastBatch;
+    delete store.lastFactBatch;
     invalidateContextCache(store);
     await unghostAllMessages(store);
     if (!targetIsCurrent(target)) return;
@@ -2807,7 +2942,8 @@ function updateStateUI() {
     $('#sc_state_allowance').val(s.stateTokenAllowance);
     $('#sc_state_details').toggle(s.structuredStateEnabled);
     const report = injectionReports.get(store);
-    $('#sc_state_status').text(`Snapshot through message ${state.through}; coverage begins at ${state.from}. ${effectiveFacts(state).length} facts; ${state.overrides.length} manual locks. ${report?.omittedFacts || 0} facts and ${report?.omittedSnippets || 0} snippets omitted from injection (still stored). Budget: ${report?.meterLabel || 'not measured'}.${store.lastBatch ? ` Last batch: ${store.lastBatch.milliseconds} ms.` : ''}`);
+    const progress = activeRun?.target.store === store ? activeRun.factProgress : null;
+    $('#sc_state_status').text(`${progress ? `Extracting missing facts: message ${progress.through} / ${progress.cutoff}. ` : needsFactBackfill(store) ? 'Missing fact coverage; automatic catch-up is pending or paused. ' : ''}Snapshot through message ${state.through}; coverage begins at ${state.from}. ${effectiveFacts(state).length} facts; ${state.overrides.length} manual locks. ${report?.omittedFacts || 0} facts and ${report?.omittedSnippets || 0} snippets omitted from injection (still stored). Budget: ${report?.meterLabel || 'not measured'}.${store.lastFactBatch ? ` Last fact catch-up batch: ${store.lastFactBatch.milliseconds} ms.` : ''}${store.lastBatch ? ` Last summary batch: ${store.lastBatch.milliseconds} ms.` : ''}`);
     $('#sc_state_json').val(JSON.stringify(state, null, 2));
     const select = document.getElementById('sc_state_fact');
     if (!select) return;
@@ -2825,14 +2961,10 @@ function bindStateUI() {
         const s = getSettings();
         s.structuredStateEnabled = $(this).prop('checked');
         const store = getChatStore();
-        // If text-only batches ran while disabled, old state cannot masquerade as
-        // a continuous snapshot. Start fresh at the next batch; pins are preserved.
-        if (s.structuredStateEnabled && store.structuredState.through !== store.summarizedUpTo) {
-            store.structuredState = { ...emptyState(), overrides: store.structuredState.overrides };
-        }
         invalidateContextCache(store);
         saveSettings();
         await persistMemoryDatabaseChange();
+        scheduleFactBackfill(true);
     });
     $('#sc_state_allowance').on('change', function () {
         getSettings().stateTokenAllowance = Math.min(800, Math.max(400, Number($(this).val()) || 600));
@@ -2865,6 +2997,13 @@ function bindStateUI() {
     $('#sc_state_pin').on('click', () => correct('pin'));
     $('#sc_state_remove').on('click', () => correct('remove'));
     $('#sc_state_unlock').on('click', () => correct('unlock'));
+    $('#sc_state_extract').on('click', async () => {
+        if (isSummarizing) { toastr.warning('A memory run is already active. Use Stop to pause it first.', 'Summaryception'); return; }
+        if (!getSettings().enabled || getSettings().pauseSummarization) {
+            toastr.warning('Enable Summaryception and unpause processing to extract missing facts.', 'Summaryception'); return;
+        }
+        await extractMissingFacts();
+    });
     $('#sc_state_rebuild').on('click', async () => {
         if (!getSettings().structuredStateEnabled) return;
         if (isSummarizing) { toastr.warning('Stop the current run before rebuilding.', 'Summaryception'); return; }
@@ -2906,6 +3045,7 @@ function bindUIEvents() {
                 'Summaryception',
                 { timeOut: 3000 }
             );
+            scheduleFactBackfill(true);
         }
     });
 

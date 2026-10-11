@@ -71,11 +71,28 @@ export function effectiveFacts(state) {
 }
 
 export function stateInstructions(state, range) {
-    return `Return ONLY a complete JSON object with exactly two fields: "summary" (a nonempty compact narrative summary following the user's focus) and "stateChanges" (an array, [] for no changes). This output format replaces any instruction to return a plain summary line.
-Maintain a compact historical state snapshot using the original passage, not guesses. Track location/time, present characters, relationships, important item ownership, injuries, immediate goals/unresolved threads, and durable facts. Never invent numerical relationship scores. Keep injuries/goals until explicitly healed/resolved; omission is NOT removal. Reuse the existing stable id for a changed fact, regardless of wording. Use semantic ids such as scene.location, item.brass_key.owner, injury.mara.hand, goal.find_ivo. New ids must be lowercase ASCII, start with a letter, and use only letters, digits, _, ., :, - (max 96 characters).
+    return `Return ONLY a complete JSON object with exactly two fields: "summary" (a nonempty compact narrative summary following the user's focus) and "stateChanges" (an array, [] for no changes). This output format replaces any instruction to return a plain summary line.\n${factChangeInstructions(state, range)}`;
+}
+
+function factChangeInstructions(state, range) {
+    return `Maintain a compact historical state snapshot using the original passage, not guesses. Track location/time, present characters, relationships, important item ownership, injuries, immediate goals/unresolved threads, and durable facts. Never invent numerical relationship scores. Keep injuries/goals until explicitly healed/resolved; omission is NOT removal. Reuse the existing stable id for a changed fact, regardless of wording. Use semantic ids such as scene.location, item.brass_key.owner, injury.mara.hand, goal.find_ivo. New ids must be lowercase ASCII, start with a letter, and use only letters, digits, _, ., :, - (max 96 characters).
 Changes use {"op":"set","id":"scene.location","category":"location","value":"East gate","source":[${range[0]},${range[1]}]} or {"op":"remove","id":"goal.find_ivo","source":[${range[0]},${range[1]}]}. Categories: ${CATEGORIES.join(', ')}. Values: 1–400 characters. Source ranges must be within this passage's message indices ${range[0]}–${range[1]}. Use explicit remove for previously recorded resolved goals or obsolete facts. Emit at most one change per ID, reflecting the final supported state of this passage. A goal introduced and resolved wholly within this passage need not enter state; capture its completion in the narrative. No other fields. At most 64 changes. Manual corrections are locked; do not change them.
 Previous validated snapshot at message ${state.through} (partial coverage begins at ${state.from}; later passage takes precedence): ${JSON.stringify(effectiveFacts(state))}
 Locked ids (including manual removals): ${JSON.stringify(state.overrides.map(item => item.id))}`;
+}
+
+export function factInstructions(state, range) {
+    return 'Return ONLY a complete JSON object with exactly one field: "stateChanges" (an array, [] for no changes). Extract facts only; do not write a narrative summary.\n'
+        + factChangeInstructions(state, range);
+}
+
+export function parseFactResponse(raw, state, range) {
+    let response;
+    try {
+        response = JSON.parse(String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+    } catch { throw new Error('Invalid state response: expected complete JSON'); }
+    requireValue(response && Object.keys(response).join(',') === 'stateChanges', 'missing or unexpected fact fields');
+    return parseStateResponse(JSON.stringify({ summary: 'Fact extraction', stateChanges: response.stateChanges }), state, range).state;
 }
 
 // Validate and construct a new state without mutating anything. The caller commits

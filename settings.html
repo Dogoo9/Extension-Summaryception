@@ -66,7 +66,7 @@
                 <input type="checkbox" id="sc_state_enabled" />
                 <span>Track facts alongside narrative summaries</span>
             </label>
-            <p class="sc-hint">Extracts a validated fact snapshot in the same batch call. Layer promotions keep this snapshot intact. Starts with the next batch; use Rebuild to include older messages. Later visible messages take precedence. JSON extraction can require a larger response token limit.</p>
+            <p class="sc-hint">Automatically extracts missing facts from already summarized original messages when enabled or when opening a chat. This catch-up uses extra model calls and preserves summaries and pinned corrections. Afterwards, facts update with each summary batch; recent verbatim replies remain the freshest context. Stop pauses catch-up; Extract Missing Facts resumes it. JSON extraction can require a larger response token limit.</p>
             <div id="sc_state_details" style="display: none;">
                 <div class="sc-row">
                     <label for="sc_state_allowance">State allowance within the total memory budget (tokens, estimated when no tokenizer is available)</label>
@@ -90,6 +90,7 @@
                 </div>
                 <p class="sc-hint">Pin locks your correction against model changes; Remove locks its absence. Unlock resumes automatic tracking. Corrections are anchored to the latest message and invalidated if that source history changes.</p>
                 <div class="sc-button-row">
+                    <button id="sc_state_extract" class="menu_button">Extract Missing Facts</button>
                     <button id="sc_state_pin" class="menu_button">Pin Correction</button>
                     <button id="sc_state_remove" class="menu_button">Remove &amp; Lock</button>
                     <button id="sc_state_unlock" class="menu_button">Unlock</button>
