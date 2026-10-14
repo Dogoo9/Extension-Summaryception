@@ -48,6 +48,13 @@
                 <button id="sc_stop_summarize" class="menu_button menu_button_danger">
                     <i class="fa-solid fa-stop"></i> Stop
                 </button>
+                <select id="sc_regenerate_scope" class="text_pole" aria-label="Summaries to regenerate">
+                    <option value="latest">Latest summary</option>
+                    <option value="all">All summaries</option>
+                </select>
+                <button id="sc_regenerate_latest" class="menu_button" type="button">
+                    <i class="fa-solid fa-rotate-right"></i> Regenerate Summaries
+                </button>
                 <button id="sc_repair" class="menu_button">
                     <i class="fa-solid fa-wrench"></i> Repair Orphans
                 </button>
@@ -59,47 +66,12 @@
                 </button>
             </div>
 
-            <hr class="sc-divider" />
-
-            <h4 class="sc-section-title">🧭 Structured State (Optional)</h4>
-            <label class="checkbox_label" for="sc_state_enabled">
-                <input type="checkbox" id="sc_state_enabled" />
-                <span>Track facts alongside narrative summaries</span>
-            </label>
-            <p class="sc-hint">Automatically extracts missing facts from already summarized original messages when enabled or when opening a chat. This catch-up uses extra model calls and preserves summaries and pinned corrections. Afterwards, facts update with each summary batch; recent verbatim replies remain the freshest context. Stop pauses catch-up; Extract Missing Facts resumes it. JSON extraction can require a larger response token limit.</p>
-            <div id="sc_state_details" style="display: none;">
-                <div class="sc-row">
-                    <label for="sc_state_allowance">State allowance within the total memory budget (tokens, estimated when no tokenizer is available)</label>
-                    <input id="sc_state_allowance" type="number" class="text_pole" min="400" max="800" step="50" />
-                </div>
-                <div id="sc_state_status" class="sc-stats-box"></div>
-                <label for="sc_state_fact">Inspect / correct a fact</label>
-                <select id="sc_state_fact" class="text_pole"></select>
-                <div class="sc-row">
-                    <label for="sc_state_id">Stable fact ID</label>
-                    <input id="sc_state_id" class="text_pole" placeholder="item.brass_key.owner" maxlength="96" />
-                    <label for="sc_state_category">Category</label>
-                    <select id="sc_state_category" class="text_pole">
-                        <option value="location">Location</option><option value="time">Time</option>
-                        <option value="present">Present characters</option><option value="relationship">Relationship</option>
-                        <option value="item">Item ownership</option><option value="injury">Injury</option>
-                        <option value="goal">Goal / unresolved thread</option><option value="fact">Durable fact</option>
-                    </select>
-                    <label for="sc_state_value">Fact value</label>
-                    <textarea id="sc_state_value" class="text_pole sc-textarea" rows="2" maxlength="400"></textarea>
-                </div>
-                <p class="sc-hint">Pin locks your correction against model changes; Remove locks its absence. Unlock resumes automatic tracking. Corrections are anchored to the latest message and invalidated if that source history changes.</p>
-                <div class="sc-button-row">
-                    <button id="sc_state_extract" class="menu_button">Extract Missing Facts</button>
-                    <button id="sc_state_pin" class="menu_button">Pin Correction</button>
-                    <button id="sc_state_remove" class="menu_button">Remove &amp; Lock</button>
-                    <button id="sc_state_unlock" class="menu_button">Unlock</button>
-                    <button id="sc_state_rebuild" class="menu_button">Rebuild Active Memory</button>
-                </div>
-                <details><summary>Stored snapshot, source ranges, and checkpoints</summary>
-                    <textarea id="sc_state_json" class="text_pole sc-textarea" rows="8" readonly></textarea>
-                </details>
+            <div id="sc_backlog_progress" class="sc-stats-box" style="display: none;">
+                <div id="sc_backlog_status" role="status" aria-live="polite"></div>
+                <progress id="sc_backlog_bar" max="1" value="0" aria-label="Backlog progress"></progress>
+                <button id="sc_cancel_backlog" class="menu_button menu_button_danger" type="button">Cancel Backlog</button>
             </div>
+            <p class="sc-hint">Regeneration uses the current prompt and original messages. Stop cancels the run and keeps original summaries. Completed backlog batches stay saved; use Force Summarize to resume.</p>
 
             <hr class="sc-divider" />
 
@@ -514,6 +486,11 @@
                         <select id="sc_prompt_preset" class="text_pole">
                             <option value="narrative">Narrative State (Default)</option>
                             <option value="gamestate">Game State</option>
+                            <option value="concise">Concise Delta</option>
+                            <option value="chronological">Chronological Events</option>
+                            <option value="relationships">Relationships &amp; Emotional Changes</option>
+                            <option value="plotthreads">Plot Threads &amp; Goals</option>
+                            <option value="continuity">Continuity Recap</option>
                             <option value="custom">Custom</option>
                         </select>
                     </div>
@@ -593,6 +570,13 @@
                     <hr class="sc-divider" />
 
                     <!-- Debug -->
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_injection_debug_overlay_enabled">
+                            <input type="checkbox" id="sc_injection_debug_overlay_enabled" />
+                            <span>Show Injection Debug Overlay</span>
+                        </label>
+                        <small class="sc-hint">Off by default. Shows the live registered summary, placement, budget, and omissions while you debug.</small>
+                    </div>
                     <div class="sc-row">
                         <label class="checkbox_label" for="sc_debug_mode">
                             <input type="checkbox" id="sc_debug_mode" />

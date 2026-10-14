@@ -2,7 +2,7 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import jquery from 'jquery';
-import * as state from '../state-memory.js';
+import * as sources from '../source-signatures.js';
 import * as budget from '../memory-budget.js';
 
 export function runtime(settings = {}, includeInit = false) {
@@ -34,7 +34,7 @@ export function runtime(settings = {}, includeInit = false) {
         messages.push({ type, text }); return $('<div><div class="toast-message"></div></div>');
     }])); toaster.clear = () => {};
     const globals = {
-        ...state, ...budget, $, document: dom.window.document, navigator: dom.window.navigator,
+        ...sources, ...budget, $, document: dom.window.document, navigator: dom.window.navigator,
         Option: dom.window.Option, Blob, URL, crypto, AbortController, DOMException, performance,
         structuredClone, setTimeout, clearTimeout, console: { log() {}, warn() {}, error() {} },
         confirm: () => true, prompt: () => 'Test profile', toastr: toaster,
@@ -49,7 +49,7 @@ export function runtime(settings = {}, includeInit = false) {
         ;
     code = includeInit ? code.replace('(async function init()', 'globalThis.initPromise = (async function init()') : code.split('(async function init()')[0];
     vm.createContext(globals);
-    vm.runInContext(code + '\nglobalThis.api = { getSettings, getChatStore, getAllMemoryStores, getCharacterMemoryKey, getAssistantTurns, normalizeChatStore, maybeSummarizeTurns, summarizeOneBatch, runCatchup, maybePromoteLayer, beginSummarization, finishSummarization, abortSummarization, buildFullContext, assembleSummaryBlock, updateInjection, onGenerationStarted, onSourceMessageChanged, onMessageReceived, reconcileMemorySources, repairIfBranched, activateCharacterMemoryStore, validateMemoryImport, clearActiveMemory, bindUIEvents, initConnectionUI, updateUI, cleanSummarizerOutput, captureMemoryTarget, targetIsCurrent, onChatChanged, invalidateContextCache, correctState, extractMissingFacts, scheduleFactBackfill, needsFactBackfill, isMemoryRunning: () => isSummarizing };', globals);
+    vm.runInContext(code + '\nglobalThis.api = { getSettings, getChatStore, getAllMemoryStores, getCharacterMemoryKey, getAssistantTurns, normalizeChatStore, maybeSummarizeTurns, summarizeOneBatch, runCatchup, maybePromoteLayer, beginSummarization, finishSummarization, abortSummarization, buildFullContext, assembleSummaryBlock, updateInjection, onGenerationStarted, onSourceMessageChanged, onMessageReceived, reconcileMemorySources, repairIfBranched, activateCharacterMemoryStore, validateMemoryImport, clearActiveMemory, bindUIEvents, initConnectionUI, updateUI, cleanSummarizerOutput, captureMemoryTarget, targetIsCurrent, onChatChanged, invalidateContextCache, regenerateSnippets, updateInjectionDebugOverlay, testCurrentConnectionHandler, isMemoryRunning: () => isSummarizing };', globals);
     const api = globals.api;
     Object.assign(api.getSettings(), { separateMemoryByCharacterCard: false, verbatimTurns: 2, turnsPerSummary: 3, connectionSource: 'completion', ...settings });
     const click = async (id, event = 'click') => {

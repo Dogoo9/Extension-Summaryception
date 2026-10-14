@@ -1,175 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runtime } from './runtime-helper.js';
-import { emptyState, parseStateResponse, messageSignature, correctState } from '../state-memory.js';
+import { messageSignature } from '../source-signatures.js';
 
-const structured = (range, value = 'East gate') => JSON.stringify({ summary: 'Moved to the gate.', stateChanges: [{ op: 'set', id: 'scene.location', category: 'location', value, source: range }] });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const plain = value => JSON.parse(JSON.stringify(value));
-
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function settledFacts(r) {
-    await wait(130); // The actual activation debounce must have fired.
-    const deadline = performance.now() + 4000;
-    while (r.api.isMemoryRunning() && performance.now() < deadline) await wait(20);
-    assert.equal(r.api.isMemoryRunning(), false, 'fact catch-up did not settle');
-}
-function legacyHistory(r, cutoff = 7) {
-    r.addTurns(6);
-    const store = r.api.getChatStore();
-    store.layers = [[], [{ text: 'Existing promoted narrative', turnRange: [0, cutoff], timestamp: 123 }]];
-    store.summarizedUpTo = cutoff;
-    store.ghostedIndices = Array.from({ length: cutoff + 1 }, (_, i) => i);
-    store.sourceSignatures = r.ctx.chat.slice(0, cutoff + 1).map(messageSignature);
-    for (let i = 0; i <= cutoff; i++) Object.assign(r.ctx.chat[i], { extra: { sc_ghosted: true }, is_system: true, is_hidden: true });
-    return store;
-}
-function factReply(_settings, _system, prompt) {
-    const match = /message indices (\d+)–(\d+)/.exec(prompt);
-    const range = [+match[1], +match[2]];
-    return JSON.stringify({ stateChanges: [{ op: 'set', id: 'scene.location', category: 'location', value: `Room ${range[1]}`, source: range }] });
-}
-
-test('enabling tracking automatically backfills originals, preserving promoted narrative, pins and verbatim window', async () => {
-    const r = runtime({ turnsPerSummary: 2 });
-    const store = legacyHistory(r);
-    store.structuredState = correctState(emptyState(), { id: 'item.key.owner', category: 'item', value: 'Ivo' }, 7);
-    r.api.getSettings().summarizerUserPrompt = 'Custom narrative focus that omits items {{story_txt}}';
-    const narrative = JSON.stringify(store.layers), ghosted = JSON.stringify(store.ghostedIndices);
-    r.respond(factReply); r.api.bindUIEvents();
-    r.$('#sc_state_enabled').prop('checked', true); await r.click('sc_state_enabled', 'change');
-    await settledFacts(r);
-    assert.equal(store.structuredState.through, 7); assert.equal(store.structuredState.from, 0);
-    assert.equal(store.structuredState.overrides[0].fact.value, 'Ivo');
-    assert.equal(store.structuredState.facts[0].value, 'Room 7');
-    assert.equal(store.summarizedUpTo, 7); assert.equal(JSON.stringify(store.layers), narrative);
-    assert.equal(JSON.stringify(store.ghostedIndices), ghosted); assert.equal(r.hides.length, 0);
-    assert.equal(r.requests.length, 2);
-    assert.ok(r.requests[0][2].includes('Player action 0'));
-    assert.ok(r.requests[1][2].includes('Reply 3')); assert.ok(!r.requests[1][2].includes('Player action 4'));
-    assert.ok(!r.requests[0][2].includes('Custom narrative focus'));
-    const count = r.requests.length;
-    await r.api.activateCharacterMemoryStore(); await settledFacts(r); assert.equal(r.requests.length, count);
-    // The next normal batch resumes the single-call summary/state contract.
-    r.respond(async (_s, _sys, prompt) => {
-        assert.ok(prompt.includes('Room 7'));
-        return structured([8, 9], 'Room 9');
-    });
-    await r.api.maybeSummarizeTurns(); // No overflow: exactly two verbatim turns.
-    assert.equal(r.requests.length, count);
-    r.addTurns(1, 6); await r.api.maybeSummarizeTurns();
-    assert.equal(r.requests.length, count + 1); assert.equal(store.structuredState.through, 9);
-});
-
-test('missing facts are extracted before the next summary, then updates share its existing call', async () => {
-    const r = runtime({ turnsPerSummary: 2, structuredStateEnabled: true });
-    const store = legacyHistory(r, 3);
-    r.respond(async (s, system, prompt) => system.includes('factual RP memory') ? factReply(s, system, prompt) : structured([4, 7], 'New location'));
-    const narrative = store.layers[1][0];
-    await r.api.summarizeOneBatch(r.api.getAssistantTurns(r.ctx.chat).filter(t => t.index > 3));
-    assert.equal(r.requests.length, 2); assert.equal(store.layers[1][0], narrative);
-    assert.equal(store.structuredState.through, 7); assert.equal(store.structuredState.facts[0].value, 'New location');
-    assert.ok(r.requests[1][2].includes('Room 3'));
-});
-
-test('stop preserves completed fact batches; Extract Missing Facts resumes without rewriting history', async () => {
-    const r = runtime({ structuredStateEnabled: true, turnsPerSummary: 2 }); const store = legacyHistory(r);
-    const d = deferred(); r.respond((...args) => r.requests.length === 1 ? factReply(...args) : d.promise);
-    const narrative = JSON.stringify(store.layers);
-    const running = r.api.extractMissingFacts();
-    while (r.requests.length < 2) await wait(20);
-    assert.equal(store.structuredState.through, 3);
-    r.api.abortSummarization(); await running; d.resolve(factReply(...r.requests[1]));
-    assert.equal(store.structuredState.through, 3); assert.equal(JSON.stringify(store.layers), narrative);
-    r.respond(factReply); r.api.bindUIEvents(); await r.click('sc_state_extract');
-    assert.equal(store.structuredState.through, 7); assert.equal(r.requests.length, 3);
-    assert.match(r.requests[2][2], /message indices 4–7/); assert.equal(r.hides.length, 0);
-});
-
-test('invalid automatic extraction pauses without retry loops, and manual retry preserves narrative', async () => {
-    const r = runtime({ structuredStateEnabled: true }); const store = legacyHistory(r, 3);
-    const narrative = JSON.stringify(store.layers);
-    r.respond(async () => '{"stateChanges":'); await r.api.activateCharacterMemoryStore(); await settledFacts(r);
-    assert.equal(store.structuredState.through, -1); assert.equal(JSON.stringify(store.layers), narrative);
-    assert.equal(r.requests.length, 1);
-    await r.api.activateCharacterMemoryStore(); await settledFacts(r); assert.equal(r.requests.length, 1);
-    r.respond(factReply); await r.api.extractMissingFacts(); assert.equal(store.structuredState.through, 3);
-});
-
-test('partial old snapshots are replayed from message zero without clearing them on invalid replies', async () => {
-    const r = runtime({ structuredStateEnabled: true, turnsPerSummary: 2 }); const store = legacyHistory(r);
-    store.structuredState = parseStateResponse(structured([4, 7]), emptyState(), [4, 7]).state;
-    const original = JSON.stringify(store.structuredState);
-    r.respond(async () => 'invalid'); await r.api.extractMissingFacts();
-    assert.equal(JSON.stringify(store.structuredState), original);
-    r.respond(factReply); await r.api.extractMissingFacts();
-    assert.match(r.requests[1][2], /message indices 0–3/); assert.equal(store.structuredState.from, 0);
-    assert.equal(store.structuredState.through, 7);
-});
-
-test('reenabling after text-only batches extracts only missing originals and retains earlier facts', async () => {
-    const r = runtime({ turnsPerSummary: 2 }); const store = legacyHistory(r, 3);
-    store.structuredState = parseStateResponse(structured([0, 3], 'Old room'), emptyState(), [0, 3]).state;
-    await r.api.summarizeOneBatch(r.api.getAssistantTurns(r.ctx.chat).filter(turn => turn.index > 3));
-    assert.equal(store.summarizedUpTo, 7); assert.equal(store.structuredState.through, 3);
-    r.respond(async (_s, _system, prompt) => {
-        assert.match(prompt, /message indices 4–7/); assert.ok(prompt.includes('Old room'));
-        return '{"stateChanges":[]}';
-    });
-    r.api.bindUIEvents(); r.$('#sc_state_enabled').prop('checked', true); await r.click('sc_state_enabled', 'change');
-    await settledFacts(r);
-    assert.equal(r.requests.length, 2); assert.equal(store.structuredState.through, 7);
-    assert.equal(store.structuredState.facts[0].value, 'Old room');
-});
-
-test('fact catch-up skips manually hidden passages and completes empty ranges without model calls', async () => {
-    const r = runtime({ structuredStateEnabled: true }); const store = legacyHistory(r, 3);
-    for (const message of r.ctx.chat.slice(0, 4)) delete message.extra.sc_ghosted;
-    await r.api.extractMissingFacts();
-    assert.equal(r.requests.length, 0); assert.equal(store.structuredState.through, 3);
-    assert.equal(store.structuredState.facts.length, 0); assert.equal(r.hides.length, 0);
-});
-
-test('queued fact catch-up waits for active run, respects pause/disable, and cannot spill into another chat', async () => {
-    const r = runtime({ structuredStateEnabled: true, pauseSummarization: true }); const store = legacyHistory(r, 3);
-    r.respond(factReply); r.api.scheduleFactBackfill(); await settledFacts(r); assert.equal(r.requests.length, 0);
-    r.api.getSettings().pauseSummarization = false;
-    const run = r.api.beginSummarization(); r.api.scheduleFactBackfill(); await wait(130);
-    assert.equal(r.requests.length, 0); r.api.finishSummarization(run); await settledFacts(r);
-    assert.equal(store.structuredState.through, 3);
-    store.structuredState = emptyState(); r.api.scheduleFactBackfill();
-    r.api.getSettings().structuredStateEnabled = false; await settledFacts(r); assert.equal(r.requests.length, 1);
-    r.api.getSettings().structuredStateEnabled = true; r.api.scheduleFactBackfill(true);
-    r.switchContext({ ...r.ctx, chat: [], chatMetadata: {} }); await settledFacts(r);
-    assert.equal(r.requests.length, 1); assert.equal(store.structuredState.through, -1);
-});
-
-test('fact catch-up rejects pending replies after source changes and card switches', async () => {
-    for (const change of ['source', 'card']) {
-        const r = runtime({ structuredStateEnabled: true, separateMemoryByCharacterCard: true }); const store = legacyHistory(r, 3);
-        const d = deferred(); r.respond(() => d.promise); const running = r.api.extractMissingFacts();
-        await Promise.resolve();
-        if (change === 'source') r.ctx.chat[0].mes = 'Retconned'; else r.ctx.characterId = 1;
-        d.resolve(factReply(...r.requests[0])); await running;
-        assert.equal(store.structuredState.through, -1, change);
-        // Source edits invalidate the old narrative too; a card switch preserves
-        // the inactive bank while discarding only the pending response.
-        assert.equal(store.layers.flat().length, change === 'source' ? 0 : 1, change);
-    }
-});
-
-test('new replies arriving during fact catch-up trigger their deferred summary afterwards', async () => {
-    const r = runtime({ structuredStateEnabled: true, turnsPerSummary: 2 }); const store = legacyHistory(r, 3);
-    const d = deferred();
-    r.respond((...args) => r.requests.length === 1 ? d.promise : structured([4, 7], 'New scene'));
-    const running = r.api.extractMissingFacts();
-    r.addTurns(1, 6); r.api.onMessageReceived(r.ctx.chat.length - 1);
-    await wait(550); assert.equal(r.requests.length, 1);
-    d.resolve(factReply(...r.requests[0])); await running;
-    await wait(600); await settledFacts(r);
-    assert.equal(r.requests.length, 2); assert.equal(store.summarizedUpTo, 7);
-    assert.equal(store.structuredState.facts[0].value, 'New scene');
-});
 
 test('normal batch includes player lead-in, replaces all variables and preserves verbatim turns', async () => {
     const r = runtime(); r.addTurns(3);
@@ -189,18 +25,6 @@ test('routine normalization preserves array identities used during promotion', (
     assert.equal(store.layers[0], layer); assert.equal(store.layers[1], dest);
 });
 
-test('structured batch commits state and summary atomically; malformed extraction ghosts nothing', async () => {
-    const r = runtime({ structuredStateEnabled: true }); r.addTurns(4);
-    r.respond(async () => '{"summary":"Partial"');
-    await r.api.summarizeOneBatch(r.api.getAssistantTurns(r.ctx.chat).slice(0, 1));
-    const store = r.api.getChatStore();
-    assert.equal(store.structuredState.through, -1); assert.equal(store.summarizedUpTo, -1);
-    assert.equal(store.layers.length, 0); assert.equal(r.hides.length, 0);
-    r.respond(async () => structured([0, 1]));
-    await r.api.summarizeOneBatch(r.api.getAssistantTurns(r.ctx.chat).slice(0, 1));
-    assert.equal(store.structuredState.through, 1); assert.equal(store.layers[0].length, 1);
-    assert.equal(r.hides.length, 2); assert.equal(store.sourceSignatures.length, 2);
-});
 
 test('stop locks the run until completion, aborts its request and catchup does not resume', async () => {
     const r = runtime(); r.addTurns(10);
@@ -218,7 +42,7 @@ test('stop locks the run until completion, aborts its request and catchup does n
 
 test('pending response is discarded on chat/card changes or source edits', async () => {
     for (const change of ['chat', 'card', 'source', 'memory']) {
-        const r = runtime({ separateMemoryByCharacterCard: true, structuredStateEnabled: true }); r.addTurns(3);
+        const r = runtime({ separateMemoryByCharacterCard: true }); r.addTurns(3);
         const oldStore = r.api.getChatStore(); const d = deferred(); r.respond(() => d.promise);
         const work = r.api.summarizeOneBatch(r.api.getAssistantTurns(r.ctx.chat).slice(0, 1));
         await Promise.resolve();
@@ -226,22 +50,19 @@ test('pending response is discarded on chat/card changes or source edits', async
         if (change === 'card') r.ctx.characterId = 1;
         if (change === 'source') r.ctx.chat[0].mes = 'Changed action';
         if (change === 'memory') r.api.invalidateContextCache(oldStore);
-        d.resolve(structured([0, 1])); await work;
-        assert.equal(oldStore.layers.length, 0, change); assert.equal(oldStore.structuredState.through, -1, change);
+        d.resolve('New narrative'); await work;
+        assert.equal(oldStore.layers.length, 0, change);
         assert.equal(r.hides.length, 0, change);
     }
 });
 
-test('multiple promotions retain source ranges and never revert newer state', async () => {
+test('multiple promotions retain every source range', async () => {
     const r = runtime({ snippetsPerLayer: 1, snippetsPerPromotion: 2, maxLayers: 4 }); r.addTurns(8);
     const store = r.api.getChatStore();
     store.layers = [Array.from({ length: 7 }, (_, i) => ({ text: `History ${i}`, turnRange: [i * 2, i * 2 + 1] }))];
     store.summarizedUpTo = 13;
-    store.structuredState = parseStateResponse(structured([0, 13], 'Current castle'), emptyState(), [0, 13]).state;
-    const before = JSON.stringify(store.structuredState);
     const run = r.api.beginSummarization();
     try { await r.api.maybePromoteLayer(0, run); } finally { r.api.finishSummarization(run); }
-    assert.equal(JSON.stringify(store.structuredState), before);
     assert.ok(store.layers.length >= 3);
     const ranges = store.layers.flat().map(sn => sn.turnRange).sort((a, b) => a[0] - b[0]);
     assert.equal(ranges[0][0], 0); assert.equal(ranges.at(-1)[1], 13);
@@ -258,17 +79,12 @@ test('failed promotion leaves original arrays/snippets intact throughout request
     d.resolve('Late'); assert.equal(store.layers[0].length, 2);
 });
 
-test('backlog state extraction uses every original player passage and keeps verbatim window', async () => {
-    const r = runtime({ structuredStateEnabled: true, turnsPerSummary: 2 }); r.addTurns(7);
-    r.respond(async (_s, _system, prompt) => {
-        const range = /message indices (\d+)–(\d+)/.exec(prompt);
-        return structured([Number(range[1]), Number(range[2])]);
-    });
+test('backlog summaries use every original player passage and keeps verbatim window', async () => {
+    const r = runtime({ turnsPerSummary: 2 }); r.addTurns(7);
     await r.api.runCatchup(r.api.getAssistantTurns(r.ctx.chat), 5);
     const store = r.api.getChatStore();
     assert.deepEqual(plain(store.layers[0].map(s => s.turnRange)), [[0, 3], [4, 7], [8, 9]]);
     for (const [i, request] of r.requests.entries()) assert.ok(request[2].includes(`Player: Player action ${i * 2}`));
-    assert.equal(store.structuredState.through, 9);
     assert.equal(r.api.getAssistantTurns(r.ctx.chat).filter(t => t.index > store.summarizedUpTo).length, 2);
 });
 
@@ -291,29 +107,23 @@ test('edits, swipe, deletion, branches repair every layer and inactive bank', as
     }
 });
 
-test('aligned edits restore checkpoint; old promoted histories rebuild conservatively', async () => {
-    const r = runtime({ structuredStateEnabled: true }); r.addTurns(4);
-    r.respond(async (_s, _sys, prompt) => { const m = /message indices (\d+)–(\d+)/.exec(prompt); return structured([+m[1], +m[2]], `Location ${m[2]}`); });
+test('edits roll back affected snippets and restore originals', async () => {
+    const r = runtime({  }); r.addTurns(4);
     await r.api.summarizeOneBatch(r.api.getAssistantTurns(r.ctx.chat).slice(0, 1));
     await r.api.summarizeOneBatch(r.api.getAssistantTurns(r.ctx.chat).slice(1, 2));
     const store = r.api.getChatStore(); r.ctx.chat[2].mes = 'Retconned'; r.api.reconcileMemorySources();
-    assert.equal(store.structuredState.through, 1); assert.equal(store.summarizedUpTo, 1);
-    assert.equal(store.structuredState.facts[0].value, 'Location 1');
+    assert.equal(store.summarizedUpTo, 1);
     assert.equal(r.ctx.chat[2].extra?.sc_ghosted, undefined); assert.equal(r.ctx.chat[2].is_system, false);
 });
 
-test('legacy text-only and database exports import; state import validates before mutating memory', () => {
+test('legacy text-only and database exports import; invalid snippets are rejected', () => {
     const r = runtime(); r.addTurns(3);
     assert.equal(r.api.validateMemoryImport({ layers: [['Legacy']], summarizedUpTo: -1 }).layers[0][0].text, 'Legacy');
     assert.equal(r.api.validateMemoryImport({ layers: [{ snippets: [{ text: 'DB legacy' }] }], summarizedUpTo: -1 }).layers[0][0].text, 'DB legacy');
-    const state = parseStateResponse(structured([0, 1]), emptyState(), [0, 1]).state;
-    const bank = { layers: [[{ text: 'Saved', turnRange: [0, 1] }]], summarizedUpTo: 1, structuredState: state, sourceSignatures: r.ctx.chat.slice(0, 2).map(messageSignature) };
-    assert.deepEqual(plain(r.api.validateMemoryImport({ store: bank }).structuredState), state);
-    assert.throws(() => r.api.validateMemoryImport({ store: { ...bank, sourceSignatures: [] } }), /signatures/);
     assert.throws(() => r.api.validateMemoryImport({ layers: [[{ nope: true }]] }), /snippet/);
 });
 
-test('shared bank is copied; card banks and state remain isolated', () => {
+test('shared bank is copied; card banks remain isolated', () => {
     const r = runtime({ separateMemoryByCharacterCard: true });
     const a = r.api.getChatStore(); a.layers = [[{ text: 'Mara memory' }]];
     r.ctx.characterId = 1; const b = r.api.getChatStore(); assert.equal(b.layers.length, 0);
@@ -341,14 +151,6 @@ test('all settings buttons have handlers and saved prompts/reset/cleanup operate
     s.verbatimTurns = 49; await r.click('sc_reset_defaults'); assert.equal(s.verbatimTurns, 10); assert.equal(s.savedCustomPrompts.length, 1);
 });
 
-test('state correction controls pin/remove/unlock and clear removes dormant state', async () => {
-    const r = runtime({ structuredStateEnabled: true }); r.addTurns(1); r.api.bindUIEvents();
-    r.$('#sc_state_id').val('item.key.owner'); r.$('#sc_state_category').val('item'); r.$('#sc_state_value').val('Ivo');
-    await r.click('sc_state_pin'); assert.equal(r.api.getChatStore().structuredState.overrides[0].fact.value, 'Ivo');
-    await r.click('sc_state_remove'); assert.equal(r.api.getChatStore().structuredState.overrides[0].fact, null);
-    await r.click('sc_state_unlock'); assert.equal(r.api.getChatStore().structuredState.overrides.length, 0);
-    await r.click('sc_state_pin'); await r.api.clearActiveMemory(); assert.equal(r.api.getChatStore().structuredState.overrides.length, 0);
-});
 
 test('repair and disable-message-hiding preserve manual hidden messages', async () => {
     const r = runtime(); r.addTurns(2); r.api.bindUIEvents();
@@ -365,13 +167,12 @@ test('reasoning is removed before strip delimiters, without leaking internal tho
 });
 
 test('generation-time async token count bounds registered injection including wrapper', async () => {
-    const r = runtime({ structuredStateEnabled: true, contextBudget: 450 }); r.addTurns(2);
+    const r = runtime({ contextBudget: 450 }); r.addTurns(2);
     const store = r.api.getChatStore(); store.layers = [[{ text: 'Narrative '.repeat(100), turnRange: [0, 1] }, { text: 'Short recent event.', turnRange: [2, 3] }]]; store.summarizedUpTo = 3;
-    store.structuredState = parseStateResponse(structured([0, 3]), emptyState(), [0, 3]).state;
     r.ctx.getTokenCountAsync = async text => text.length;
     await r.api.onGenerationStarted();
     assert.ok(r.ctx.extensionPrompts.summaryception.value.length <= 450);
-    assert.ok(r.$('#sc_state_status').text().includes('active tokenizer'));
+    assert.ok(r.$('#sc_injection_inspector').text().includes('active tokenizer'));
 });
 
 test('canceling backlog dialog releases the run; skip excludes old turns on later triggers', async () => {
@@ -396,13 +197,6 @@ test('card activation clears old owned visibility even when active key changed o
     assert.equal(r.ctx.chat[0].extra.sc_ghosted, undefined); assert.equal(r.ctx.chat[0].is_system, false);
 });
 
-test('disabled state mode sends original custom prompt without extraction, dormant state survives', async () => {
-    const r = runtime({ structuredStateEnabled: false }); r.addTurns(3);
-    const store = r.api.getChatStore(); store.structuredState = emptyState();
-    await r.api.summarizeOneBatch(r.api.getAssistantTurns(r.ctx.chat).slice(0, 1));
-    assert.ok(!r.requests[0][2].includes('stateChanges'));
-    assert.equal(store.structuredState.through, -1);
-});
 
 test('stop restores the original prompt-order objects without changing a newly selected preset', async () => {
     const r = runtime({ connectionSource: 'default' }); r.addTurns(2);
@@ -422,36 +216,212 @@ test('module initialization accepts eventTypes and initializes UI after APP_READ
     await r.ready;
     for (const name of ['MESSAGE_RECEIVED', 'CHAT_CHANGED', 'GENERATION_STARTED', 'MESSAGE_UPDATED', 'MESSAGE_SWIPE_DELETED']) assert.ok(r.events.has(name), name);
     assert.equal(r.$('#sc_enabled').prop('checked'), true);
-    assert.equal(r.$('#sc_state_enabled').prop('checked'), false);
+    assert.equal(r.dom.window.document.getElementById('sc_state_enabled'), null);
 });
 
-test('legacy recall metadata remains available when structured state is disabled', () => {
-    const r = runtime(); const store = r.api.getChatStore();
-    store.layers = [[{ text: 'Old narrative.', recall: { durableFacts: ['Mara swore an oath'], currentLocation: 'Archive' } }]];
-    const injection = r.api.assembleSummaryBlock();
-    assert.ok(injection.includes('Mara swore an oath'));
-    assert.ok(injection.includes('Historical recalled scene: Archive'));
+
+test('retired facts and recall are dropped from old banks/imports without losing narrative or source ranges', async () => {
+    const r = runtime(); r.addTurns(3);
+    const store = r.api.getChatStore();
+    store.layers = [[{ text: 'Existing prose.', turnRange: [0, 1], recall: { durableFacts: ['Do not inject this'] } }]];
+    store.summarizedUpTo = 1;
+    store.structuredState = { version: 99, facts: [{ value: 'Retired fact' }] };
+    store.lastFactBatch = { range: [0, 1] };
+    Object.assign(r.api.getSettings(), { structuredStateEnabled: true, stateTokenAllowance: 800 });
+    const imported = r.api.validateMemoryImport({ store });
+    assert.equal(imported.structuredState, undefined);
+    assert.equal(imported.layers[0][0].recall, undefined);
+    assert.deepEqual(plain(imported.layers[0][0].turnRange), [0, 1]);
+    await r.api.activateCharacterMemoryStore(); await wait(150);
+    assert.equal(r.requests.length, 0);
+    const text = r.api.assembleSummaryBlock();
+    assert.ok(text.includes('Existing prose.'));
+    assert.ok(!text.includes('Retired fact') && !text.includes('Do not inject this'));
+    assert.equal(store.structuredState, undefined); assert.equal(store.lastFactBatch, undefined);
+    assert.equal(r.api.getSettings().structuredStateEnabled, undefined);
 });
 
-test('fixed replay preserves ownership, injury, scene, relationships and unresolved task across promotions', async () => {
-    const { readFileSync } = await import('node:fs');
-    const fixture = JSON.parse(readFileSync(new URL('../docs/replay-narrative.json', import.meta.url), 'utf8'));
-    const r = runtime({ ...fixture.settings, structuredStateEnabled: true });
-    for (const turn of fixture.turns) r.ctx.chat.push({ is_user: true, name: 'Alex', mes: turn.user }, { is_user: false, name: 'Mara', mes: turn.assistant });
+test('Cancel Backlog aborts the in-flight batch, keeps completed batches, and Force can resume', async () => {
+    const r = runtime({ turnsPerSummary: 2 }); r.addTurns(7); r.api.bindUIEvents();
+    const d = deferred(); r.respond(() => r.requests.length === 1 ? 'First saved summary.' : d.promise);
+    const work = r.api.runCatchup(r.api.getAssistantTurns(r.ctx.chat), 5);
+    while (r.requests.length < 2) await wait(10);
+    assert.equal(r.$('#sc_backlog_progress')[0].style.display, '');
+    assert.ok(r.$('#sc_backlog_status').text().includes('1 / 3'));
+    await r.click('sc_cancel_backlog'); await work;
+    assert.equal(r.requests[1][3].signal.aborted, true);
+    assert.equal(r.api.getChatStore().layers[0].length, 1);
+    assert.equal(r.api.getChatStore().summarizedUpTo, 3);
+    assert.equal(r.$('#sc_backlog_progress')[0].style.display, 'none');
+    d.resolve('Late response'); r.respond(async () => 'Resumed summary.');
+    await r.click('sc_force_summarize');
+    assert.equal(r.api.getChatStore().summarizedUpTo, 9);
+    assert.equal(r.api.getAssistantTurns(r.ctx.chat).filter(t => t.index > 9).length, 2);
+});
+
+test('explicit dialog Cancel makes no requests and releases the run', async () => {
+    const r = runtime({ turnsPerSummary: 1 }); r.addTurns(8);
+    const work = r.api.maybeSummarizeTurns();
+    r.dom.window.document.getElementById('sc_catchup_cancel').click(); await work;
+    assert.equal(r.requests.length, 0); assert.equal(r.api.isMemoryRunning(), false);
+    assert.equal(r.api.getChatStore().summarizedUpTo, -1);
+});
+
+test('cancel after a batch commit finishes and saves its visibility without starting another batch', async () => {
+    const r = runtime(); r.addTurns(6);
+    const original = r.ctx.executeSlashCommandsWithOptions;
+    r.ctx.executeSlashCommandsWithOptions = async (...args) => {
+        await original(...args);
+        if (r.hides.length === 1) r.api.abortSummarization();
+    };
+    const saves = []; r.ctx.saveMetadata = async () => saves.push(plain(r.api.getChatStore().ghostedIndices));
+    await r.api.runCatchup(r.api.getAssistantTurns(r.ctx.chat), 4);
+    assert.equal(r.requests.length, 1);
+    assert.deepEqual(plain(r.api.getChatStore().ghostedIndices), [0, 1, 2, 3, 4, 5]);
+    assert.deepEqual(saves.at(-1), [0, 1, 2, 3, 4, 5]);
+});
+
+function regenerationHistory(r) {
+    r.addTurns(5); const store = r.api.getChatStore();
+    store.layers = [[{ text: 'Later events.', turnRange: [4, 5] }, { text: 'Latest events.', turnRange: [6, 7] }],
+        [{ text: 'Earlier events.', turnRange: [0, 3], promoted: true }]];
+    store.summarizedUpTo = 7;
+    return store;
+}
+
+test('latest regeneration includes ghosted originals, bounded earlier context, and no future memory', async () => {
+    const r = runtime({ contextBudget: 30, contextBudgetUnit: 'characters' }); const store = regenerationHistory(r);
+    store.layers[1][0].text = 'x'.repeat(300);
+    for (const m of r.ctx.chat.slice(0, 8)) { m.is_system = true; m.is_hidden = true; m.extra = { sc_ghosted: true }; }
+    r.api.bindUIEvents(); r.respond(async () => 'Fresh summary.');
+    await r.click('sc_regenerate_latest');
+    const prompt = r.requests[0][2];
+    assert.ok(prompt.includes('Player action 3') && prompt.includes('Reply 3'));
+    const prior = /<prior_context>(.*?)<\/prior_context>/s.exec(prompt)[1];
+    assert.ok(prior.length <= 30); assert.ok(!prior.includes('Latest events'));
+    assert.equal(store.layers[0][1].text, 'Fresh summary.');
+    assert.equal(store.layers[0][0].text, 'Later events.');
+    assert.equal(store.summarizedUpTo, 7); assert.equal(r.hides.length, 0);
+});
+
+test('all regeneration stages replacements chronologically and commits every layer together', async () => {
+    const r = runtime(); const store = regenerationHistory(r); r.api.bindUIEvents();
+    const original = JSON.stringify(store.layers);
     r.respond(async (_s, _sys, prompt) => {
-        const range = /message indices (\d+)–(\d+)/.exec(prompt);
-        if (!range) return 'Compressed historical narrative.';
-        const deltas = fixture.turns.flatMap(turn => turn.expectedChanges).filter(change => change.source[0] >= +range[1] && change.source[1] <= +range[2]);
-        const recorded = new Set(r.api.getChatStore().structuredState.facts.map(fact => fact.id));
-        const changes = [...new Map(deltas.map(change => [change.id, change])).values()]
-            .filter(change => change.op !== 'remove' || recorded.has(change.id));
-        return JSON.stringify({ summary: `Narrative messages ${range[1]}–${range[2]}.`, stateChanges: changes });
+        assert.equal(JSON.stringify(store.layers), original);
+        if (r.requests.length === 2) assert.ok(prompt.includes('New summary 1'));
+        return `New summary ${r.requests.length}`;
     });
-    await r.api.runCatchup(r.api.getAssistantTurns(r.ctx.chat), 14);
-    const state = r.api.getChatStore().structuredState;
-    assert.equal(state.through, 27);
-    assert.deepEqual(Object.fromEntries(state.facts.map(fact => [fact.id, fact.value])), fixture.expectedAtCutoff);
-    for (const id of fixture.resolvedIds) assert.ok(!state.facts.some(fact => fact.id === id));
-    assert.ok(r.api.getChatStore().layers[1].length > 0);
-    assert.equal(r.api.getAssistantTurns(r.ctx.chat).filter(turn => turn.index > 27).length, 4);
+    r.$('#sc_regenerate_scope').val('all'); await r.click('sc_regenerate_latest');
+    assert.equal(r.requests.length, 3);
+    assert.equal(store.layers[1][0].text, 'New summary 1');
+    assert.equal(store.layers[0][0].text, 'New summary 2');
+    assert.equal(store.layers[0][1].text, 'New summary 3');
+    assert.equal(store.layers[1][0].promoted, true);
+});
+
+test('canceling all regeneration preserves every original and later responses cannot overwrite them', async () => {
+    const r = runtime(); const store = regenerationHistory(r);
+    const original = JSON.stringify(store.layers); const d = deferred();
+    r.respond(() => r.requests.length === 1 ? 'Staged text' : d.promise);
+    const work = r.api.regenerateSnippets(store.layers.flat());
+    while (r.requests.length < 2) await wait(5);
+    r.api.abortSummarization(); assert.equal(await work, false); d.resolve('Late');
+    assert.equal(JSON.stringify(store.layers), original); assert.equal(r.hides.length, 0);
+});
+
+test('regeneration retains originals on invalid sources, model errors, edits and chat/card changes', async () => {
+    for (const change of ['error', 'empty', 'source', 'chat', 'card', 'memory']) {
+        const r = runtime({ separateMemoryByCharacterCard: true }); const store = regenerationHistory(r);
+        const original = JSON.stringify(store.layers); const d = deferred();
+        if (change === 'empty') r.ctx.chat.slice(0, 4).forEach(m => { m.mes = ''; });
+        r.respond(() => change === 'error' ? Promise.reject(new Error('Invalid model')) : d.promise);
+        const work = r.api.regenerateSnippets([store.layers[1][0]]);
+        if (change === 'source') r.ctx.chat[0].mes = 'Retconned';
+        if (change === 'chat') r.switchContext({ ...r.ctx, chat: [], chatMetadata: {} });
+        if (change === 'card') r.ctx.characterId = 1;
+        if (change === 'memory') r.api.invalidateContextCache(store);
+        d.resolve('Replacement'); assert.equal(await work, false, change);
+        assert.equal(JSON.stringify(store.layers), original, change);
+    }
+});
+
+test('promoted snippets expose regeneration through the snippet browser', async () => {
+    const r = runtime(); const store = regenerationHistory(r); r.api.updateUI();
+    const button = r.dom.window.document.querySelector('.sc-snippet[data-layer="1"] .sc-snippet-redo');
+    assert.ok(button);
+    await r.$._data(button, 'events').click[0].handler.call(button);
+    assert.equal(store.layers[1][0].regenerated, true);
+});
+
+test('each added preset keeps supported incremental continuity and editing switches to custom', async () => {
+    const r = runtime(); r.api.bindUIEvents();
+    for (const preset of ['concise', 'chronological', 'relationships', 'plotthreads', 'continuity']) {
+        r.$('#sc_prompt_preset').val(preset); await r.click('sc_prompt_preset', 'change');
+        const prompt = r.api.getSettings().summarizerUserPrompt;
+        assert.ok(prompt.includes('{{story_txt}}') && prompt.includes('{{context_str}}'));
+        assert.ok(prompt.includes('Do not continue the roleplay'));
+        r.$('#sc_summarizer_user_prompt').val('My custom focus {{story_txt}}');
+        await r.click('sc_summarizer_user_prompt', 'input');
+        assert.equal(r.api.getSettings().promptPreset, 'custom');
+    }
+});
+
+test('debug overlay is opt-in, shows actual registry text safely, follows changes and closes', async () => {
+    const r = runtime(); const store = regenerationHistory(r); r.api.bindUIEvents(); r.api.updateInjection();
+    const doc = r.dom.window.document;
+    assert.equal(doc.getElementById('sc_injection_debug_overlay'), null);
+    r.$('#sc_injection_debug_overlay_enabled').prop('checked', true); await r.click('sc_injection_debug_overlay_enabled', 'change');
+    const panel = doc.getElementById('sc_injection_debug_overlay');
+    assert.equal(panel.querySelector('pre').textContent, r.ctx.extensionPrompts.summaryception.value);
+    store.layers[0][1].text = '<img src=x onerror="alert(1)">'; r.api.updateInjection();
+    assert.ok(panel.querySelector('pre').textContent.includes('<img')); assert.equal(panel.querySelector('img'), null);
+    r.$('#sc_enabled').prop('checked', false); await r.click('sc_enabled', 'change');
+    assert.match(panel.querySelector('pre').textContent, /No Summaryception injection/);
+    panel.querySelector('.sc-debug-close').click();
+    assert.equal(doc.getElementById('sc_injection_debug_overlay'), null);
+    assert.equal(r.api.getSettings().injectionDebugOverlay, false);
+});
+
+test('debug overlay retains measured injection report after preview refresh', async () => {
+    const r = runtime({ contextBudget: 450, injectionDebugOverlay: true }); regenerationHistory(r);
+    r.ctx.getTokenCountAsync = async text => text.length;
+    await r.api.onGenerationStarted(); r.api.updateUI();
+    const panel = r.dom.window.document.getElementById('sc_injection_debug_overlay');
+    assert.ok(panel.textContent.includes('measured tokens'));
+    assert.equal(panel.querySelector('pre').textContent, r.ctx.extensionPrompts.summaryception.value);
+});
+
+test('changing settings during async tokenization cannot register stale injection', async () => {
+    for (const change of ['disable', 'budget', 'placement']) {
+        const r = runtime({ contextBudget: 450 }); regenerationHistory(r);
+        const d = deferred(); r.ctx.getTokenCountAsync = () => d.promise;
+        const work = r.api.onGenerationStarted();
+        const s = r.api.getSettings();
+        if (change === 'disable') s.enabled = false;
+        if (change === 'budget') s.contextBudget = 1;
+        if (change === 'placement') s.injectionPosition = 'in_chat';
+        r.api.updateInjection(); const expected = plain(r.ctx.extensionPrompts.summaryception);
+        d.resolve(10); await work;
+        assert.deepEqual(plain(r.ctx.extensionPrompts.summaryception), expected, change);
+    }
+});
+
+test('connection test aborts on timeout and clears the timeout after success', async () => {
+    const r = runtime({ summarizerTimeoutMs: 20 });
+    await r.api.testCurrentConnectionHandler(); await wait(30);
+    assert.equal(r.requests[0][3].signal.aborted, false, 'successful request timeout was not cleared');
+    const d = deferred(); r.respond(() => d.promise);
+    await r.api.testCurrentConnectionHandler();
+    assert.equal(r.requests[1][3].signal.aborted, true);
+    assert.ok(r.messages.at(-1).text.includes('timed out')); d.resolve('Late');
+});
+
+test('regeneration restores original snippets when persistence rejects the commit', async () => {
+    const r = runtime(); const store = regenerationHistory(r);
+    const original = JSON.stringify(store.layers);
+    r.ctx.saveMetadata = async () => { throw new Error('Cannot save metadata'); };
+    assert.equal(await r.api.regenerateSnippets(store.layers.flat()), false);
+    assert.equal(JSON.stringify(store.layers), original);
+    assert.equal(r.api.isMemoryRunning(), false);
 });
