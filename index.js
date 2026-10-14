@@ -1,5 +1,5 @@
 /**
- * Summaryception v5.5.6 — Layered Recursive Summarization for SillyTavern
+ * Summaryception v5.5.7 — Layered Recursive Summarization for SillyTavern
  *
  * NON-DESTRUCTIVE: Uses SillyTavern's native /hide and /unhide commands
  * to exclude summarized messages from LLM context while keeping them
@@ -16,15 +16,12 @@ import {
     populateProfileDropdown,
     getConnectionDisplayName,
 } from './connectionutil.js';
-import {
-    emptyState, validateStoredState, effectiveFacts, stateInstructions, parseStateResponse, factInstructions, parseFactResponse,
-    rollbackState, correctState, messageSignature, firstSourceChange,
-} from './state-memory.js';
+import { messageSignature, firstSourceChange } from './source-signatures.js';
 import { createMeter, assembleBudgetedMemory, assembleBudgetedMemoryAsync } from './memory-budget.js';
 
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
-const EXTENSION_VERSION = '5.5.6';
+const EXTENSION_VERSION = '5.5.7';
 const shownMigrationWarnings = new Set();
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -75,7 +72,6 @@ const TUNING = Object.freeze({
 
     // ── Connection UI ──────────────────────────────────────────────
     connectionStatusTimeout:  8_000,    // ms — auto-hide the status indicator
-    stopButtonCooldown:       2_000,    // ms — brief disable after clicking Stop
 });
 
 // Legacy alias — keeps RETRY_CONFIG references readable without a noisy diff.
@@ -122,8 +118,6 @@ const defaultSettings = Object.freeze({
     maxLayers: 5,
     contextBudget: 4096,
     contextBudgetUnit: 'tokens',          // 'tokens' (estimated at 4 chars each) | 'characters'
-    structuredStateEnabled: false,
-    stateTokenAllowance: 600,
     savedCustomPrompts: [],
     injectionTemplate: '\n\n<auto_injected_historical_context>\n[system guidance: this is a historical summary of messages that occurred prior to the oldest assistant message currently in context for this chat]\n{{summary}}\n</auto_injected_historical_context>\n\n',
     injectionPosition: 'in_prompt',        // 'in_prompt' | 'in_chat' | 'before_prompt'
@@ -136,7 +130,7 @@ const defaultSettings = Object.freeze({
 
     summarizerUserPrompt: NARRATIVE_PROMPT,
 
-    promptPreset: 'narrative',  // 'narrative' | 'gamestate' | 'custom'
+    promptPreset: 'narrative',
     pauseSummarization: false,  // true = stop processing, keep injecting
     disableGhosting: false,     // mark summarized ranges without hiding messages
     separateMemoryByCharacterCard: true,  // true = keep independent memory banks per active character card within each chat
@@ -152,6 +146,7 @@ const defaultSettings = Object.freeze({
 
     debugMode: false,
     traceMode: false,
+    injectionDebugOverlay: false,
 
     // ─── Connection Settings ─────────────────────────────────────
     connectionSource: 'default',          // 'default' | 'profile' | 'ollama' | 'openai' | 'koboldcpp' | 'completion' | 'custom'
@@ -194,6 +189,12 @@ const defaultSettings = Object.freeze({
 const PROMPT_PRESETS = {
     narrative: NARRATIVE_PROMPT,
 
+    concise: focusedSummaryPrompt('Keep only consequential actions, revelations, decisions, and changes needed to continue the story. Use at most 8 short phrases. Omit flavor, repeated emotions, and dialogue that adds no information.'),
+    chronological: focusedSummaryPrompt('Record meaningful events in chronological order. Group related actions into compact scene phrases. Preserve causes, consequences, accomplishments, and transitions between named locations; avoid a play-by-play.'),
+    relationships: focusedSummaryPrompt('Prioritize changes in trust, intimacy, conflict, vulnerability, power, and commitments between named characters. Retain decisions, revelations, and plot events that explain those changes. Omit repeated emotions and generic body language.'),
+    plotthreads: focusedSummaryPrompt('Prioritize introduced, advanced, or resolved goals, mysteries, promises, threats, and unanswered questions. Identify who is involved and what changed. Preserve necessary events and relationships for continuity; never invent future plans or treat resolved threads as still open.'),
+    continuity: focusedSummaryPrompt('Balance chronological events, named character developments, relationship changes, and unresolved plot threads. Preserve consequential changes to location, possessions, injuries, knowledge, and commitments in the narrative. Omit decorative details and repetitions.'),
+
     gamestate: `<player_name>
 {{player_name}}
 </player_name>
@@ -218,6 +219,16 @@ Write in short phrases, no more than 20; output must be a single line:`,
 };
 
 const DEFAULT_PROMPT_PRESET = 'narrative';
+
+function focusedSummaryPrompt(focus) {
+    return `<player_name>{{player_name}}</player_name>
+<prior_context>{{context_str}}</prior_context>
+<passage_in_question>{{story_txt}}</passage_in_question>
+
+Pause the roleplay and summarize only new information in passage_in_question needed to coherently continue prior_context. Second-person prose refers to {{player_name}}; use the player's name.
+${focus}
+Use only supported events from the supplied passage. Do not continue the roleplay, invent motives, or repeat information already in prior_context. If prior_context is empty, establish relevant identities and setting. Output only a compact summary on one line, no headings or commentary, at most 20 short phrases.`;
+}
 
 const EXTENSION_PROMPT_TYPES = Object.freeze({
     IN_PROMPT: 0,
@@ -344,7 +355,13 @@ function getSettings() {
             extensionSettings[MODULE_NAME][key] = structuredClone(defaultSettings[key]);
         }
     }
-    return extensionSettings[MODULE_NAME];
+    const settings = extensionSettings[MODULE_NAME];
+    if (Object.hasOwn(settings, 'structuredStateEnabled') || Object.hasOwn(settings, 'stateTokenAllowance')) {
+        delete settings.structuredStateEnabled;
+        delete settings.stateTokenAllowance;
+        SillyTavern.getContext().saveSettingsDebounced();
+    }
+    return settings;
 }
 
 function saveSettings() {
@@ -373,7 +390,6 @@ function createEmptyChatStore() {
         layers: [],
         summarizedUpTo: -1,
         ghostedIndices: [],           // Track which messages WE ghosted
-        structuredState: emptyState(),
         sourceSignatures: [],
     };
 }
@@ -393,39 +409,6 @@ function snippetText(snippet) {
     return typeof snippet === 'string' ? snippet : (snippet?.text || '');
 }
 
-function normalizeRecall(recall) {
-    if (!recall || typeof recall !== 'object') return undefined;
-    const list = value => [...new Set((Array.isArray(value) ? value : [])
-        .map(item => String(item).trim()).filter(Boolean))];
-    const normalized = {
-        entities: list(recall.entities),
-        unresolvedThreads: list(recall.unresolvedThreads),
-        durableFacts: list(recall.durableFacts),
-        currentLocation: typeof recall.currentLocation === 'string' ? recall.currentLocation.trim() : '',
-        currentTime: typeof recall.currentTime === 'string' ? recall.currentTime.trim() : '',
-        supersededFacts: list(recall.supersededFacts),
-    };
-    return Object.values(normalized).some(value => Array.isArray(value) ? value.length : value)
-        ? normalized : undefined;
-}
-
-function mergeRecallFields(snippets) {
-    const recalls = snippets.map(sn => normalizeRecall(sn?.recall)).filter(Boolean);
-    if (!recalls.length) return undefined;
-    const supersededFacts = [...new Set(recalls.flatMap(item => item.supersededFacts))];
-    const superseded = new Set(supersededFacts.map(item => item.toLocaleLowerCase()));
-    const uniqueActive = field => [...new Set(recalls.flatMap(item => item[field]))]
-        .filter(item => !superseded.has(item.toLocaleLowerCase()));
-    return normalizeRecall({
-        entities: uniqueActive('entities'),
-        unresolvedThreads: uniqueActive('unresolvedThreads'),
-        durableFacts: uniqueActive('durableFacts'),
-        currentLocation: recalls.findLast(item => item.currentLocation)?.currentLocation || '',
-        currentTime: recalls.findLast(item => item.currentTime)?.currentTime || '',
-        supersededFacts,
-    });
-}
-
 function normalizeChatStore(store) {
     if (!store || typeof store !== 'object') store = createEmptyChatStore();
     if (!Array.isArray(store.layers)) store.layers = [];
@@ -441,7 +424,12 @@ function normalizeChatStore(store) {
     }
     if (typeof store.summarizedUpTo !== 'number') store.summarizedUpTo = -1;
     if (!Array.isArray(store.ghostedIndices)) store.ghostedIndices = [];
-    if (!store.structuredState) store.structuredState = emptyState();
+    // Retire fact snapshots and legacy recall metadata while preserving prose,
+    // ranges, signatures, and visibility ownership from older saves/imports.
+    delete store.structuredState;
+    delete store.lastFactBatch;
+    if (store.lastBatch) delete store.lastBatch.structuredState;
+    for (const snippet of store.layers.flat()) delete snippet.recall;
     if (!Array.isArray(store.sourceSignatures)) store.sourceSignatures = [];
     const chatLength = SillyTavern.getContext()?.chat?.length;
     store.ghostedIndices = [...new Set(store.ghostedIndices.filter(index =>
@@ -640,7 +628,6 @@ function getMemoryRoot() {
             layers: root.layers,
             summarizedUpTo: root.summarizedUpTo,
             ghostedIndices: root.ghostedIndices,
-            structuredState: root.structuredState,
             sourceSignatures: root.sourceSignatures,
         });
 
@@ -841,7 +828,6 @@ async function activateCharacterMemoryStore() {
         await ghostMessagesUpTo(store.summarizedUpTo, getSummarizedRangeStart(store), target);
     }
     displayedMemoryBank = { chat: target.chat, store };
-    scheduleFactBackfill();
 }
 
 async function saveChatStore() {
@@ -938,10 +924,13 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0, target = captureMemor
     if (rangeStart > rangeEnd) return;
 
     const ghostedIndices = new Set(store.ghostedIndices);
+    const revision = storeRevisions.get(store) || 0;
     let newlyGhosted = 0;
 
     for (let i = rangeStart; i <= rangeEnd; i++) {
-        if (!targetIsCurrent(target) || currentAbortController?.signal.aborted) break;
+        // Finish visibility for an already committed batch even after Stop.
+        // A source repair, card switch, or disable still invalidates this work.
+        if (!targetIsCurrent(target) || revision !== (storeRevisions.get(store) || 0) || !s.enabled) break;
         const msg = chat[i];
         if (!msg) continue;
         if (msg.is_system && !msg.extra?.sc_ghosted) continue;
@@ -984,23 +973,14 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0, target = captureMemor
  * end and trim stale snippets/ghost markers from every memory bank.
  */
 function truncateMemoryStore(store, dirty) {
-    const hadState = store.structuredState.through >= 0;
     for (let i = 0; i < store.layers.length; i++) {
         store.layers[i] = store.layers[i].filter(sn => sn.turnRange && sn.turnRange[1] < dirty);
     }
     recalculateSummarizedUpTo(store);
-    store.structuredState = rollbackState(store.structuredState, dirty);
-    if (hadState && store.structuredState.through !== store.summarizedUpTo) {
-        store.layers = [];
-        store.summarizedUpTo = -1;
-        store.structuredState = { ...emptyState(), overrides: store.structuredState.overrides };
-    }
-    const signatureEnd = Math.max(store.summarizedUpTo, ...store.structuredState.overrides.map(o => o.anchor));
-    store.sourceSignatures.length = Math.max(0, signatureEnd + 1);
+    store.sourceSignatures.length = Math.max(0, store.summarizedUpTo + 1);
     store.ghostedIndices = store.ghostedIndices.filter(i => i <= store.summarizedUpTo);
     invalidateContextCache(store);
     if (store.lastBatch?.range?.[1] >= dirty) delete store.lastBatch;
-    if (store.lastFactBatch?.range?.[1] >= dirty) delete store.lastFactBatch;
 }
 
 function restoreUncoveredGhosts() {
@@ -1024,11 +1004,11 @@ function reconcileMemorySources(changedHint = null) {
     for (const [, store] of getAllMemoryStores()) {
         let dirty = firstSourceChange(store.sourceSignatures, chat);
         const futureRanges = store.layers.flat().filter(sn => sn.turnRange?.[1] >= chat.length);
-        if (store.summarizedUpTo >= chat.length || futureRanges.length || store.structuredState.through >= chat.length) {
+        if (store.summarizedUpTo >= chat.length || futureRanges.length) {
             dirty = dirty < 0 ? chat.length : Math.min(dirty, chat.length);
         }
         if (Number.isInteger(changedHint) && changedHint >= 0
-            && (store.summarizedUpTo >= changedHint || store.structuredState.overrides.some(o => o.anchor >= changedHint))) {
+            && store.summarizedUpTo >= changedHint) {
             dirty = dirty < 0 ? changedHint : Math.min(dirty, changedHint);
         }
         if (dirty < 0) continue;
@@ -1261,10 +1241,6 @@ let currentAbortController = null;
 let activeRun = null;
 let chatEpoch = 0;
 let catchupDialogClose = null;
-let factBackfillTimer = null;
-let pendingFactBackfill = null;
-const factBackfillAttempts = new WeakMap();
-
 function captureMemoryTarget() {
     const ctx = SillyTavern.getContext();
     return {
@@ -1298,6 +1274,7 @@ function beginSummarization() {
     currentAbortController = new AbortController();
     activeRun = { target: captureMemoryTarget(), controller: currentAbortController };
     isSummarizing = true;
+    updateProcessingUI();
     return activeRun;
 }
 
@@ -1306,18 +1283,32 @@ function finishSummarization(run) {
     activeRun = null;
     currentAbortController = null;
     isSummarizing = false;
-    if (pendingFactBackfill) queueFactBackfill();
+    updateProcessingUI();
     if (!run.controller.signal.aborted && targetIsCurrent(run.pendingSummaryTarget)) {
         onMessageReceived(run.pendingSummaryMessageIndex);
     }
 }
 
 function abortSummarization() {
-    clearTimeout(factBackfillTimer);
-    pendingFactBackfill = null;
+    clearTimeout(messageReceivedTimer);
+    if (activeRun) delete activeRun.pendingSummaryTarget;
     currentAbortController?.abort();
     catchupDialogClose?.();
+    updateProcessingUI();
     // Keep the run locked until its finally block, including promotion/catchup.
+}
+
+function updateProcessingUI() {
+    const stopping = Boolean(activeRun?.controller.signal.aborted);
+    $('#sc_stop_summarize').prop('disabled', !isSummarizing || stopping);
+    $('#sc_force_summarize, #sc_regenerate_latest').prop('disabled', isSummarizing);
+    $('#sc_backlog_progress').toggle(Boolean(activeRun?.backlog));
+    $('#sc_cancel_backlog').prop('disabled', stopping);
+    if (activeRun?.backlog) {
+        const { completed, total } = activeRun.backlog;
+        $('#sc_backlog_status').text(`${stopping ? 'Canceling backlog' : 'Processing backlog'}: ${completed} / ${total} batches saved`);
+        $('#sc_backlog_bar').attr('max', Math.max(total, 1)).val(completed);
+    }
 }
 
 function runIsCurrent(run) {
@@ -1335,14 +1326,12 @@ function delayWithSignal(ms, signal) {
 
 // ─── Core: LLM Summarization with Retry ──────────────────────────────
 
-async function callSummarizer(storyTxt, contextStr, extraInstructions = '', structured = false, factsOnly = false) {
+async function callSummarizer(storyTxt, contextStr, extraInstructions = '') {
     const s = structuredClone(getSettings());
     const variables = { player_name: getPlayerName(), context_str: contextStr || '(none yet)', story_txt: storyTxt };
-    const prompt = (factsOnly ? `Extract supported facts from this original RP passage:\n${storyTxt}`
-        : s.summarizerUserPrompt.replace(/{{(player_name|context_str|story_txt)}}/g, (_, key) => variables[key]))
+    const prompt = s.summarizerUserPrompt.replace(/{{(player_name|context_str|story_txt)}}/g, (_, key) => variables[key])
         + (extraInstructions ? `\n\n${extraInstructions}` : '');
-    const systemPrompt = factsOnly ? 'You maintain factual RP memory. Use only the supplied original passage and validated snapshot. Return the requested complete JSON object, with no commentary.' : s.summarizerSystemPrompt + (structured
-        ? '\nReturn the complete JSON summary/stateChanges object required below, without commentary.' : '');
+    const systemPrompt = s.summarizerSystemPrompt;
     const defaultMode = !s.connectionSource || s.connectionSource === 'default';
     const snapshot = defaultMode ? snapshotPromptToggles() : null;
     if (defaultMode) disableAllPromptToggles();
@@ -1367,7 +1356,7 @@ async function callSummarizer(storyTxt, contextStr, extraInstructions = '', stru
                     sendSummarizerRequest(s, systemPrompt, prompt, { signal: request.signal }), cancelled,
                 ]);
                 if (parent?.aborted) return '';
-                const result = structured ? String(raw || '').trim() : cleanSummarizerOutput(raw);
+                const result = cleanSummarizerOutput(raw);
                 if (!result) { const error = new Error('Empty response from summarizer'); error.retryable = true; throw error; }
                 return result;
             } catch (error) {
@@ -1398,118 +1387,6 @@ async function callSummarizer(storyTxt, contextStr, extraInstructions = '', stru
 function unsummarizedTurns(chat, store) {
     return getAssistantTurns(chat).filter(turn => turn.index > store.summarizedUpTo
         && !(chat[turn.index].is_hidden && !chat[turn.index].extra?.sc_ghosted));
-}
-
-function needsFactBackfill(store) {
-    return store.summarizedUpTo >= 0 && (store.structuredState.from > 0
-        || store.structuredState.through < store.summarizedUpTo);
-}
-
-function factBackfillKey(store) {
-    return `${store.summarizedUpTo}/${store.structuredState.through}/${store.structuredState.from}/${storeRevisions.get(store) || 0}`;
-}
-
-// Debounce chat/card activation and enable events. A busy run drains the queued
-// request in its finally block; failed extraction is not retried on every render.
-function scheduleFactBackfill(force = false) {
-    const s = getSettings();
-    if (!s.enabled || !s.structuredStateEnabled || s.pauseSummarization) return;
-    const target = captureMemoryTarget();
-    if (!needsFactBackfill(target.store)) return;
-    pendingFactBackfill = { target, force: force || Boolean(pendingFactBackfill?.force) };
-    queueFactBackfill();
-}
-
-function queueFactBackfill() {
-    clearTimeout(factBackfillTimer);
-    factBackfillTimer = setTimeout(async () => {
-        factBackfillTimer = null;
-        if (isSummarizing) return;
-        const queued = pendingFactBackfill;
-        pendingFactBackfill = null;
-        const s = getSettings();
-        if (!queued || !targetIsCurrent(queued.target) || !s.enabled || !s.structuredStateEnabled || s.pauseSummarization) return;
-        if (!queued.force && factBackfillAttempts.get(queued.target.store) === factBackfillKey(queued.target.store)) return;
-        await extractMissingFacts();
-    }, 100);
-}
-
-async function extractMissingFacts() {
-    const s = getSettings();
-    if (!s.enabled || !s.structuredStateEnabled || s.pauseSummarization || isSummarizing) return false;
-    const run = beginSummarization();
-    if (!run) return false;
-    try {
-        reconcileMemorySources();
-        if (!runIsCurrent(run)) return false;
-        return await backfillStructuredState(run);
-    } catch (error) {
-        toastr.error(`Fact catch-up paused: ${error.message}. Existing narrative kept.`, 'Summaryception');
-        return false;
-    } finally {
-        factBackfillAttempts.set(run.target.store, factBackfillKey(run.target.store));
-        finishSummarization(run);
-        updateInjection(); updateUI();
-    }
-}
-
-async function backfillStructuredState(run) {
-    if (!runIsCurrent(run) || !getSettings().structuredStateEnabled) return false;
-    const { chat, store } = run.target;
-    if (!needsFactBackfill(store)) return true;
-    // Old partial snapshots missed earlier facts. Replay locally from zero, but
-    // replace stored state only after a valid response; keep manual locks.
-    let state = store.structuredState.from > 0
-        ? { ...emptyState(), overrides: structuredClone(store.structuredState.overrides) } : store.structuredState;
-    const cutoff = store.summarizedUpTo;
-    const batchSize = Math.max(1, Math.floor(Number(getSettings().turnsPerSummary) || 3));
-    const turns = getAssistantTurns(chat).filter(turn => turn.index > state.through && turn.index <= cutoff);
-    let turnOffset = 0;
-    let completed = 0;
-    const toast = toastr.info(`Extracting missing facts through message ${cutoff}…`, 'Summaryception', {
-        timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true, onCloseClick: abortSummarization,
-    });
-    run.factProgress = { through: state.through, cutoff };
-    updateUI();
-    try {
-        while (state.through < cutoff && runIsCurrent(run)) {
-            const start = state.through + 1;
-            const end = turns.length - turnOffset > batchSize ? turns[turnOffset + batchSize - 1].index : cutoff;
-            turnOffset += batchSize;
-            const range = [start, end];
-            const transaction = captureTransaction(run.target, end);
-            const passage = buildPassageFromRange(chat, start, end, true);
-            const started = performance.now();
-            const result = passage.trim()
-                ? await callSummarizer(passage, '', factInstructions(state, range), true, true)
-                : '{"stateChanges":[]}';
-            if (!result || !runIsCurrent(run) || !transactionIsCurrent(transaction)) return false;
-            let next;
-            try { next = parseFactResponse(result, state, range); }
-            catch (error) {
-                toastr.error(`${error.message}. Fact catch-up paused; use Extract Missing Facts to retry. Existing narrative kept.`, 'Summaryception');
-                return false;
-            }
-            store.structuredState = next;
-            for (let i = 0; i <= end; i++) store.sourceSignatures[i] = transaction.signatures[i];
-            store.lastFactBatch = { milliseconds: Math.round(performance.now() - started), range };
-            invalidateContextCache(store);
-            state = next;
-            completed++;
-            run.factProgress.through = end;
-            await saveChatStore();
-            if (!runIsCurrent(run)) return false;
-            $(toast).find('.toast-message').text(`Extracting facts: message ${end} / ${cutoff} — click × to stop`);
-            updateInjection(); updateUI();
-            await delayWithSignal(TUNING.catchupInterBatchDelay, run.controller.signal);
-        }
-        if (!runIsCurrent(run)) return false;
-        toastr.success(`Fact catch-up complete: ${completed} batches, ${effectiveFacts(state).length} facts.`, 'Summaryception');
-        return true;
-    } finally {
-        delete run.factProgress;
-        clearPersistentToast(toast);
-    }
 }
 
 async function maybeSummarizeTurns() {
@@ -1556,10 +1433,6 @@ async function summarizeOneBatch(visibleTurns) {
 
 async function summarizeOneBatchFromTurns(visibleTurns, run = activeRun) {
     if (!runIsCurrent(run)) return false;
-    // A snapshot must first include existing summarized originals, including
-    // text-only batches created while tracking was disabled.
-    if (getSettings().structuredStateEnabled && !await backfillStructuredState(run)) return false;
-    if (!runIsCurrent(run)) return false;
     const { chat, store } = run.target;
     const s = getSettings();
     const batch = visibleTurns.filter(turn => turn.index > store.summarizedUpTo).slice(0, s.turnsPerSummary);
@@ -1567,34 +1440,26 @@ async function summarizeOneBatchFromTurns(visibleTurns, run = activeRun) {
     // Include the player lead-in and all interleaved messages, including message 0.
     const passageStart = Math.max(0, store.summarizedUpTo + 1);
     const endIdx = batch.at(-1).index;
-    const storyTxt = buildPassageFromRange(chat, passageStart, endIdx, Boolean(s.structuredStateEnabled));
+    const storyTxt = buildPassageFromRange(chat, passageStart, endIdx);
     if (!storyTxt.trim()) return false;
     const transaction = captureTransaction(run.target, endIdx);
     const range = [passageStart, endIdx];
-    const stateEnabled = Boolean(s.structuredStateEnabled);
-    const instructions = stateEnabled ? stateInstructions(store.structuredState, range) : '';
     const started = performance.now();
-    const result = await callSummarizer(storyTxt, buildFullContext(0), instructions, stateEnabled);
+    const result = await callSummarizer(storyTxt, buildFullContext(0));
     if (!result || !runIsCurrent(run) || !transactionIsCurrent(transaction)) return false;
-    let parsed = { summary: result, state: store.structuredState };
-    if (stateEnabled) {
-        try { parsed = parseStateResponse(result, store.structuredState, range); }
-        catch (error) {
-            toastr.error(`${error.message}. Previous state and source messages kept.`, 'Summaryception', { timeOut: 8000 });
-            return false;
-        }
-    }
-    // No awaits between validation and the combined narrative/state commit.
     if (!store.layers[0]) store.layers[0] = [];
-    store.layers[0].push({ text: parsed.summary, turnRange: range, timestamp: Date.now() });
-    store.structuredState = parsed.state;
+    store.layers[0].push({ text: result, turnRange: range, timestamp: Date.now() });
     store.summarizedUpTo = endIdx;
     for (let i = 0; i <= endIdx; i++) store.sourceSignatures[i] = transaction.signatures[i];
-    store.lastBatch = { milliseconds: Math.round(performance.now() - started), structuredState: stateEnabled, range };
+    store.lastBatch = { milliseconds: Math.round(performance.now() - started), range };
     invalidateContextCache(store);
     await saveChatStore();
     if (!runIsCurrent(run)) return true;
     await ghostMessagesUpTo(endIdx, passageStart, run.target);
+    if (targetIsCurrent(run.target)) {
+        await saveChatStore();
+        if (targetIsCurrent(run.target)) await SillyTavern.getContext().saveChat?.();
+    }
     if (!runIsCurrent(run)) return true;
     await maybePromoteLayer(0, run);
     if (!runIsCurrent(run)) return true;
@@ -1611,9 +1476,17 @@ async function runCatchup(visibleTurns, overflow) {
     const s = getSettings();
     const total = Math.ceil(overflow / s.turnsPerSummary);
     let completed = 0;
+    run.backlog = { completed, total };
+    updateProcessingUI();
     const toast = toastr.info(`Processing backlog: 0 / ${total}`, 'Summaryception', {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true, onCloseClick: abortSummarization,
     });
+    const cancelButton = document.createElement('button');
+    cancelButton.type = 'button';
+    cancelButton.className = 'menu_button sc-toast-cancel-backlog';
+    cancelButton.textContent = 'Cancel Backlog';
+    cancelButton.addEventListener('click', event => { event.stopPropagation(); abortSummarization(); cancelButton.disabled = true; });
+    $(toast).append(cancelButton);
     try {
         while (runIsCurrent(run)) {
             const turns = unsummarizedTurns(run.target.chat, run.target.store);
@@ -1621,6 +1494,7 @@ async function runCatchup(visibleTurns, overflow) {
             if (remaining <= 0) break;
             if (!await summarizeOneBatchFromTurns(turns.slice(0, remaining), run)) break;
             completed++;
+            run.backlog.completed = completed;
             $(toast).find('.toast-message').text(`Processing backlog: ${completed} / ${total} — click × to stop`);
             updateUI();
             await delayWithSignal(TUNING.catchupInterBatchDelay, run.controller.signal);
@@ -1678,6 +1552,7 @@ async function showCatchupDialog(overflowCount, estimatedCalls) {
         <span class="sc-btn-desc">Summarize ${s.turnsPerSummary} turns now, deal with the rest later</span>
         </div>
         </button>
+        <button id="sc_catchup_cancel" class="menu_button"><i class="fa-solid fa-xmark"></i> Cancel</button>
         </div>
         </div>
         </div>
@@ -1689,7 +1564,11 @@ async function showCatchupDialog(overflowCount, estimatedCalls) {
             if (catchupDialogClose === cancel) catchupDialogClose = null;
             resolve(choice);
         };
-        const cancel = () => finish('cancel');
+        const cancel = () => {
+            currentAbortController?.abort();
+            clearTimeout(messageReceivedTimer);
+            finish('cancel');
+        };
         const keyHandler = event => { if (event.key === 'Escape') cancel(); };
         catchupDialogClose = cancel;
         document.addEventListener('keydown', keyHandler);
@@ -1703,6 +1582,7 @@ async function showCatchupDialog(overflowCount, estimatedCalls) {
         overlay.querySelector('#sc_catchup_partial').addEventListener('click', () => {
             finish('partial');
         });
+        overlay.querySelector('#sc_catchup_cancel').addEventListener('click', cancel);
     });
 }
 
@@ -1729,14 +1609,11 @@ async function maybePromoteLayer(layerIndex, run = activeRun) {
         const text = await callSummarizer(toMerge.map(snippetText).join(' '), buildFullContext(layerIndex + 1),
             'This is historical memory promotion. Preserve identities, durable facts and unresolved threads. Keep events chronological. Do not describe this older passage as the current scene.');
         if (!text || !runIsCurrent(run) || !transactionIsCurrent(transaction)) return;
-        const recall = mergeRecallFields(toMerge);
         const ranges = toMerge.map(sn => sn.turnRange).filter(Boolean);
         layer.splice(0, toMerge.length);
         destLayer.push({ text, fromLayer: layerIndex, mergedCount: toMerge.length, timestamp: Date.now(),
             ...(ranges.length === toMerge.length ? { turnRange: [Math.min(...ranges.map(r => r[0])), Math.max(...ranges.map(r => r[1]))] } : {}),
-            ...(recall ? { recall } : {}),
         });
-        // Promotion only changes narrative layers. It never writes structured state.
         invalidateContextCache(store);
     }
     if (layer.length > s.snippetsPerLayer) await maybePromoteLayer(layerIndex, run);
@@ -1759,26 +1636,16 @@ function getMemoryAssemblyOptions() {
     const store = getChatStore();
     const snippets = [];
     for (let i = store.layers.length - 1; i >= 0; i--) snippets.push(...(store.layers[i] || []));
-    const state = store.structuredState;
-    const facts = s.structuredStateEnabled ? effectiveFacts(state) : [];
     // Prioritize canonical deepest history, then newest unpromoted events;
     // render accepted snippets in chronological order.
     const deepest = store.layers.findLastIndex(layer => layer?.length);
     const canonicalCount = deepest >= 0 ? store.layers[deepest].length : 0;
     const narrative = snippets.map((sn, order) => ({ text: snippetText(sn), order }));
-    const legacyRecall = !s.structuredStateEnabled ? mergeRecallFields(snippets) : null;
-    const legacyParts = legacyRecall ? [
-        legacyRecall.unresolvedThreads.length ? `Historical unresolved threads: ${legacyRecall.unresolvedThreads.join('; ')}` : '',
-        legacyRecall.durableFacts.length ? `Historical durable facts: ${legacyRecall.durableFacts.join('; ')}` : '',
-        legacyRecall.entities.length ? `Historical entities: ${legacyRecall.entities.join('; ')}` : '',
-        legacyRecall.currentLocation || legacyRecall.currentTime
-            ? `Historical recalled scene: ${[legacyRecall.currentLocation, legacyRecall.currentTime].filter(Boolean).join('; ')}` : '',
-    ].filter(Boolean).map((text, index) => ({ text, order: index - 4 })) : [];
-    const prioritized = [...legacyParts, ...narrative.slice(0, canonicalCount), ...narrative.slice(canonicalCount).reverse()];
+    const prioritized = [...narrative.slice(0, canonicalCount), ...narrative.slice(canonicalCount).reverse()];
     return {
-        narrative: prioritized, facts, state,
+        narrative: prioritized,
         template: s.injectionTemplate || defaultSettings.injectionTemplate,
-        meter: getMemoryMeter(), stateAllowance: Math.min(800, Math.max(400, Number(s.stateTokenAllowance) || 600)),
+        meter: getMemoryMeter(),
     };
 }
 
@@ -1823,6 +1690,46 @@ function getInjectionDebugSummary(value, position, depth, scan, role) {
     };
 }
 
+let registeredInjectionReport = null;
+let injectionMeasurementSequence = 0;
+
+function injectionConfigurationKey() {
+    const s = getSettings();
+    return JSON.stringify([s.enabled, s.contextBudget, s.contextBudgetUnit, s.injectionTemplate,
+        s.injectionPosition, s.injectionDepth, s.injectionRole, s.injectionScan]);
+}
+
+function updateInjectionDebugOverlay() {
+    let panel = document.getElementById('sc_injection_debug_overlay');
+    if (!getSettings().injectionDebugOverlay) { panel?.remove(); return; }
+    if (!panel) {
+        panel = document.createElement('section');
+        panel.id = 'sc_injection_debug_overlay';
+        panel.className = 'sc-injection-debug-overlay';
+        panel.setAttribute('aria-label', 'Summaryception injection debug overlay');
+        panel.innerHTML = `<div class="sc-debug-header"><strong>Summaryception · Injection Debug</strong><button type="button" class="menu_button sc-debug-close" aria-label="Close injection debug overlay">×</button></div>
+            <p class="sc-hint">Live registered memory block. Use SillyTavern's Prompt Inspector to inspect the complete final prompt.</p>
+            <div class="sc-debug-metadata"></div><pre class="sc-debug-text"></pre>`;
+        panel.querySelector('.sc-debug-close').addEventListener('click', () => {
+            getSettings().injectionDebugOverlay = false;
+            saveSettings();
+            $('#sc_injection_debug_overlay_enabled').prop('checked', false);
+            panel.remove();
+        });
+        document.body.appendChild(panel);
+    }
+    const registered = SillyTavern.getContext().extensionPrompts?.[MODULE_NAME];
+    const value = registered?.value || '';
+    const report = registeredInjectionReport;
+    panel.querySelector('.sc-debug-metadata').textContent = [
+        `Position ${registered?.position ?? 'unregistered'} · depth ${registered?.depth ?? '—'} · role ${registered?.role ?? '—'} · World Info scan ${registered?.scan ? 'on' : 'off'}`,
+        `${value.length} characters · ${report?.measuredTokens != null ? `${report.measuredTokens} measured tokens` : `~${estimateTokens(value)} estimated tokens`}`,
+        report ? `Budget: ${report.meterLabel}. ${report.omittedSnippets} snippets omitted (still stored).` : '',
+    ].filter(Boolean).join('\n');
+    // Never interpret model/user memory text as markup.
+    panel.querySelector('.sc-debug-text').textContent = value || '(No Summaryception injection registered)';
+}
+
 function setSummaryceptionExtensionPrompt(value) {
     const ctx = SillyTavern.getContext();
     const s = getSettings();
@@ -1837,6 +1744,8 @@ function setSummaryceptionExtensionPrompt(value) {
     const role = getInjectionRoleValue(s.injectionRole);
 
     ctx.setExtensionPrompt(MODULE_NAME, value || '', position, depth, scan, role);
+    registeredInjectionReport = value ? injectionReports.get(getChatStore()) || null : null;
+    updateInjectionDebugOverlay();
 
     const registered = ctx.extensionPrompts?.[MODULE_NAME];
     if (registered && registered.value !== String(value || '')) {
@@ -1936,15 +1845,16 @@ async function onGenerationStarted() {
     const tokenizer = ctx.getTokenCountAsync || ctx.getTokenCount;
     if (typeof tokenizer !== 'function' || getSettings().contextBudgetUnit === 'characters') return;
     const target = captureMemoryTarget();
-    const through = Math.max(target.store.summarizedUpTo, ...target.store.structuredState.overrides.map(o => o.anchor));
+    const through = target.store.summarizedUpTo;
     const transaction = captureTransaction(target, through);
+    const configuration = injectionConfigurationKey();
+    const sequence = ++injectionMeasurementSequence;
     const report = await assembleBudgetedMemoryAsync(getMemoryAssemblyOptions(), text => tokenizer.call(ctx, text));
-    if (!transactionIsCurrent(transaction)) return;
+    if (!transactionIsCurrent(transaction) || configuration !== injectionConfigurationKey() || sequence !== injectionMeasurementSequence) return;
     injectionReports.set(target.store, report);
     setSummaryceptionExtensionPrompt(report.text);
     $('#sc_preview').val(report.text || '(empty — budget cannot fit a complete memory item)');
     updateInjectionInspector(report.text);
-    updateStateUI();
 }
 
 function onSourceMessageChanged(index) {
@@ -1954,7 +1864,6 @@ function onSourceMessageChanged(index) {
     }
     updateInjection();
     updateUI();
-    scheduleFactBackfill();
 }
 
 // ─── Slash Commands ──────────────────────────────────────────────────
@@ -2095,6 +2004,7 @@ function updateUI() {
         $('#sc_prompt_preset').val(s.promptPreset);
         $('#sc_debug_mode').prop('checked', s.debugMode);
         $('#sc_trace_mode').prop('checked', s.traceMode);
+        $('#sc_injection_debug_overlay_enabled').prop('checked', s.injectionDebugOverlay);
         $('#sc_strip_patterns').val((s.stripPatterns || []).join('\n'));
         $('#sc_summarizer_response_length').val(s.summarizerResponseLength || 0);
 
@@ -2137,8 +2047,8 @@ function updateUI() {
         $('#sc_preview').val(preview || '(empty — no summaries yet)');
         updateInjectionInspector(preview);
 
+        updateProcessingUI();
         updateSnippetBrowser();
-        updateStateUI();
         renderCustomPromptSlots();
     } catch (e) {
         log('updateUI error:', e);
@@ -2160,8 +2070,8 @@ function updateInjectionInspector(preview = assembleSummaryBlock()) {
         `<div class="sc-layer-stat">📌 Position: <strong>${escapeHtml(positionLabel)}</strong>${s.injectionPosition === 'in_chat' ? ` at depth ${getInjectionDepthValue(s)}` : ''} · role: <strong>${escapeHtml(s.injectionRole || 'system')}</strong> · World Info scan: <strong>${s.injectionScan ? 'on' : 'off'}</strong></div>`,
         `<div class="sc-layer-stat">📏 Preview: <strong>${(preview || '').length}</strong> chars / ~${estimateTokens(preview)} tokens · Registered: <strong>${registeredValue.length}</strong> chars / ~${estimateTokens(registeredValue)} tokens</div>`,
         (() => {
-            const report = injectionReports.get(getChatStore());
-            return report ? `<div class="sc-layer-stat">Budget: ${escapeHtml(report.meterLabel)}${report.measuredTokens != null ? ` · measured injection: ${report.measuredTokens} tokens` : ''}. Omitted from injection: ${report.omittedFacts} facts, ${report.omittedSnippets} snippets (still stored).</div>` : '';
+            const report = registeredInjectionReport;
+            return report ? `<div class="sc-layer-stat">Budget: ${escapeHtml(report.meterLabel)}${report.measuredTokens != null ? ` · measured injection: ${report.measuredTokens} tokens` : ''}. Omitted from injection: ${report.omittedSnippets} snippets (still stored).</div>` : '';
         })(),
         registered && typeof registered === 'object'
             ? `<details><summary>Raw registered extension prompt object</summary><pre>${escapeHtml(JSON.stringify(registered, null, 2))}</pre></details>`
@@ -2247,7 +2157,6 @@ function getMemoryDatabaseSnapshot() {
             groupName: attachment.groupName,
             summarizedUpTo: store.summarizedUpTo ?? -1,
             ghostedIndices: [...(store.ghostedIndices || [])],
-            structuredState: structuredClone(store.structuredState),
             sourceSignatures: [...store.sourceSignatures],
             snippetCount: layers.reduce((sum, layer) => sum + layer.snippets.length, 0),
             layers,
@@ -2350,9 +2259,6 @@ function buildMemoryDatabaseHtml(snapshot) {
                 </button>`}
             </div>
             <div class="sc-db-attachments">${attachmentRows}</div>
-            <details class="sc-db-state"><summary>State snapshot · through ${bank.structuredState.through} · ${effectiveFacts(bank.structuredState).length} facts</summary>
-                <pre>${escapeHtml(JSON.stringify(bank.structuredState, null, 2))}</pre>
-            </details>
             ${layerHtml}
         </details>`;
     }).join('');
@@ -2640,7 +2546,7 @@ function updateSnippetBrowser() {
                         ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
                         : '';
                 const seedStr = sn.promoted ? ' 🌱' : '';
-                const canRedo = (i === 0 && sn.turnRange);
+                const canRedo = Boolean(sn.turnRange);
                 const redoBtn = canRedo
                     ? `<button class="sc-snippet-redo menu_button fa-solid fa-rotate-right" title="Regenerate this snippet"></button>`
                     : '';
@@ -2707,88 +2613,11 @@ function updateSnippetBrowser() {
         textarea.focus().select();
     });
 
-    // Redo snippet
+    // Regeneration is available for promoted snippets that retain source ranges.
     $('.sc-snippet-redo').off('click').on('click', async function () {
-        const layerIdx = parseInt($(this).closest('.sc-snippet').data('layer'));
-        const snippetIdx = parseInt($(this).closest('.sc-snippet').data('idx'));
-        const store = getChatStore();
-        const layer = store.layers[layerIdx];
-        if (!layer || !layer[snippetIdx]) return;
-
-        const sn = layer[snippetIdx];
-
-        if (!sn.turnRange) {
-            toastr.warning(
-                'Only Layer 0 (turn summary) snippets can be regenerated. Promoted meta-summaries have no source turns.',
-                'Summaryception',
-                { timeOut: 5000 }
-            );
-            return;
-        }
-
-        if (isSummarizing) {
-            toastr.warning('Already summarizing. Please wait.', 'Summaryception');
-            return;
-        }
-
-        const [rangeStart, rangeEnd] = sn.turnRange;
-        const { chat } = SillyTavern.getContext();
-
-        if (!confirm(`Regenerate summary for turns ${rangeStart}–${rangeEnd}?`)) return;
-
-        const run = beginSummarization();
-        if (!run) return;
-        const transaction = captureTransaction(run.target, rangeEnd);
-        const btn = $(this);
-        btn.prop('disabled', true).removeClass('fa-rotate-right').addClass('fa-spinner fa-spin');
-
-        try {
-            const storyTxt = buildPassageFromRange(chat, rangeStart, rangeEnd);
-
-            if (!storyTxt.trim()) {
-                toastr.error('Source turns are empty — cannot regenerate.', 'Summaryception');
-                return;
-            }
-
-            const contextParts = [];
-            for (let i = store.layers.length - 1; i >= 0; i--) {
-                const l = store.layers[i];
-                if (!l) continue;
-                for (let j = 0; j < l.length; j++) {
-                    if (l[j].turnRange && l[j].turnRange[1] >= rangeStart) continue;
-                    if (!l[j].turnRange) continue;
-                    contextParts.push(l[j].text);
-                }
-            }
-            const contextStr = contextParts.length > 0 ? contextParts.join(' ') : '(none yet)';
-
-            toastr.info(`Regenerating summary for turns ${rangeStart}–${rangeEnd}…`, 'Summaryception', {
-                timeOut: 3000,
-                progressBar: true,
-            });
-
-            const newSummary = await callSummarizer(storyTxt, contextStr);
-
-            if (!newSummary || !runIsCurrent(run) || !transactionIsCurrent(transaction)) {
-                toastr.error('Regeneration failed — original snippet kept.', 'Summaryception');
-                return;
-            }
-
-            sn.text = newSummary;
-            sn.timestamp = Date.now();
-            sn.regenerated = true;
-            invalidateContextCache(store);
-
-            await saveChatStore();
-            updateInjection();
-            updateUI();
-
-            toastr.success(`Snippet regenerated for turns ${rangeStart}–${rangeEnd}`, 'Summaryception', { timeOut: 3000 });
-
-        } finally {
-            finishSummarization(run);
-            btn.prop('disabled', false).removeClass('fa-spinner fa-spin').addClass('fa-rotate-right');
-        }
+        const row = $(this).closest('.sc-snippet');
+        const snippet = getChatStore().layers[Number(row.data('layer'))]?.[Number(row.data('idx'))];
+        if (snippet) await regenerateSnippets([snippet]);
     });
 
     // Delete snippet
@@ -2809,6 +2638,73 @@ function updateSnippetBrowser() {
     });
 }
 
+// Regenerate from originals, with bounded earlier context and an atomic commit.
+// A canceled/failed multi-snippet run keeps every original snippet.
+async function regenerateSnippets(snippets) {
+    if (!getSettings().enabled) { toastr.warning('Enable Summaryception first.', 'Summaryception'); return false; }
+    if (isSummarizing) { toastr.warning('Stop the current run before regenerating.', 'Summaryception'); return false; }
+    const target = captureMemoryTarget();
+    const validRange = sn => Array.isArray(sn.turnRange) && sn.turnRange.length === 2
+        && sn.turnRange.every(Number.isInteger) && sn.turnRange[0] >= 0
+        && sn.turnRange[1] >= sn.turnRange[0] && sn.turnRange[1] < target.chat.length;
+    if (!snippets.length || snippets.some(sn => !validRange(sn) || !target.store.layers.flat().includes(sn))) {
+        toastr.warning('No summaries with available original messages to regenerate.', 'Summaryception');
+        return false;
+    }
+    const ordered = [...snippets].sort((a, b) => a.turnRange[0] - b.turnRange[0]);
+    const through = Math.max(target.store.summarizedUpTo, ...ordered.map(sn => sn.turnRange[1]));
+    const run = beginSummarization();
+    if (!run) return false;
+    const transaction = captureTransaction(target, through);
+    const replacements = new Map();
+    const toast = toastr.info(`Regenerating ${ordered.length} summary snippet(s)… Use Stop to cancel.`, 'Summaryception', { timeOut: 0, extendedTimeOut: 0 });
+    try {
+        for (const sn of ordered) {
+            const [start, end] = sn.turnRange;
+            const passage = buildPassageFromRange(target.chat, start, end);
+            if (!passage.trim()) { toastr.warning('Source messages are empty or hidden. Original summaries kept.', 'Summaryception'); return false; }
+            const prior = target.store.layers.flat().filter(item => validRange(item) && item.turnRange[1] < start)
+                .sort((a, b) => a.turnRange[0] - b.turnRange[0])
+                .map((item, order) => ({ text: replacements.get(item) || item.text, order }));
+            // Prefer recent earlier context, then render it chronologically.
+            const context = fitContextParts(prior.reverse(), getContextBudgetCharacters())
+                .sort((a, b) => a.order - b.order).map(item => item.text).join(' ') || '(none yet)';
+            const text = await callSummarizer(passage, context);
+            if (!text || !runIsCurrent(run) || !transactionIsCurrent(transaction)) return false;
+            replacements.set(sn, text);
+            $(toast).find('.toast-message').text(`Regenerating summaries: ${replacements.size} / ${ordered.length} — Use Stop to cancel`);
+        }
+        const originals = new Map([...replacements.keys()].map(sn => [sn, { ...sn }]));
+        for (const [sn, text] of replacements) Object.assign(sn, { text, timestamp: Date.now(), regenerated: true });
+        invalidateContextCache(target.store);
+        const committedRevision = storeRevisions.get(target.store);
+        try {
+            await saveChatStore();
+        } catch (error) {
+            // Restore local originals on persistence failure without overwriting
+            // an edit/source repair that occurred while saving.
+            if (storeRevisions.get(target.store) === committedRevision) {
+                for (const [sn, original] of originals) {
+                    delete sn.timestamp;
+                    delete sn.regenerated;
+                    Object.assign(sn, original);
+                }
+                invalidateContextCache(target.store);
+            }
+            throw error;
+        }
+        toastr.success(`${replacements.size} summary snippet(s) regenerated.`, 'Summaryception');
+        return true;
+    } catch (error) {
+        toastr.error(`Regeneration failed: ${error.message}. Check saved memory before continuing.`, 'Summaryception');
+        return false;
+    } finally {
+        clearPersistentToast(toast);
+        finishSummarization(run);
+        updateInjection(); updateUI();
+    }
+}
+
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -2821,10 +2717,8 @@ async function clearActiveMemory() {
     const store = target.store;
     store.layers = [];
     store.summarizedUpTo = -1;
-    store.structuredState = emptyState();
     store.sourceSignatures = [];
     delete store.lastBatch;
-    delete store.lastFactBatch;
     invalidateContextCache(store);
     await unghostAllMessages(store);
     if (!targetIsCurrent(target)) return;
@@ -2848,13 +2742,6 @@ function validateMemoryImport(data) {
     if (store.summarizedUpTo != null && (!Number.isInteger(store.summarizedUpTo) || store.summarizedUpTo < -1)) {
         throw new Error('Invalid summarized cutoff.');
     }
-    store.structuredState = validateStoredState(store.structuredState);
-    const anchor = Math.max(store.structuredState.through, ...store.structuredState.overrides.map(item => item.anchor));
-    if (anchor >= 0 && (!Array.isArray(store.sourceSignatures) || store.sourceSignatures.length <= anchor
-        || Array.from({ length: anchor + 1 }, (_, i) => store.sourceSignatures[i]).some(value => typeof value !== 'string' || !value))) {
-        throw new Error('Structured state is missing its original-message signatures.');
-    }
-    if (store.structuredState.through > (store.summarizedUpTo ?? -1)) throw new Error('State extends beyond narrative cutoff.');
     return normalizeChatStore(store);
 }
 
@@ -2934,89 +2821,6 @@ function bindCustomPromptUI() {
     });
 }
 
-function updateStateUI() {
-    const s = getSettings();
-    const store = getChatStore();
-    const state = store.structuredState;
-    $('#sc_state_enabled').prop('checked', s.structuredStateEnabled);
-    $('#sc_state_allowance').val(s.stateTokenAllowance);
-    $('#sc_state_details').toggle(s.structuredStateEnabled);
-    const report = injectionReports.get(store);
-    const progress = activeRun?.target.store === store ? activeRun.factProgress : null;
-    $('#sc_state_status').text(`${progress ? `Extracting missing facts: message ${progress.through} / ${progress.cutoff}. ` : needsFactBackfill(store) ? 'Missing fact coverage; automatic catch-up is pending or paused. ' : ''}Snapshot through message ${state.through}; coverage begins at ${state.from}. ${effectiveFacts(state).length} facts; ${state.overrides.length} manual locks. ${report?.omittedFacts || 0} facts and ${report?.omittedSnippets || 0} snippets omitted from injection (still stored). Budget: ${report?.meterLabel || 'not measured'}.${store.lastFactBatch ? ` Last fact catch-up batch: ${store.lastFactBatch.milliseconds} ms.` : ''}${store.lastBatch ? ` Last summary batch: ${store.lastBatch.milliseconds} ms.` : ''}`);
-    $('#sc_state_json').val(JSON.stringify(state, null, 2));
-    const select = document.getElementById('sc_state_fact');
-    if (!select) return;
-    const selected = select.value;
-    select.replaceChildren(new Option('-- Select or add a fact --', ''));
-    const facts = new Map(effectiveFacts(state).map(fact => [fact.id, fact]));
-    for (const item of state.overrides) if (!item.fact) facts.set(item.id, { id: item.id, value: '[removed, locked]' });
-    for (const fact of facts.values()) select.add(new Option(`${fact.id}: ${fact.value}`, fact.id));
-    select.value = selected;
-}
-
-function bindStateUI() {
-    $('#sc_state_enabled').on('change', async function () {
-        abortSummarization();
-        const s = getSettings();
-        s.structuredStateEnabled = $(this).prop('checked');
-        const store = getChatStore();
-        invalidateContextCache(store);
-        saveSettings();
-        await persistMemoryDatabaseChange();
-        scheduleFactBackfill(true);
-    });
-    $('#sc_state_allowance').on('change', function () {
-        getSettings().stateTokenAllowance = Math.min(800, Math.max(400, Number($(this).val()) || 600));
-        saveSettings(); updateInjection(); updateUI();
-    });
-    $('#sc_state_fact').on('change', function () {
-        const id = $(this).val();
-        const state = getChatStore().structuredState;
-        const fact = effectiveFacts(state).find(item => item.id === id);
-        $('#sc_state_id').val(id);
-        $('#sc_state_category').val(fact?.category || 'fact');
-        $('#sc_state_value').val(fact?.value || '');
-    });
-    const correct = async action => {
-        try {
-            const { chat } = SillyTavern.getContext();
-            if (!chat.length) throw new Error('Open a chat before correcting state.');
-            abortSummarization();
-            const store = getChatStore();
-            store.structuredState = correctState(store.structuredState, {
-                id: String($('#sc_state_id').val() || '').trim(),
-                category: $('#sc_state_category').val(), value: $('#sc_state_value').val(),
-                remove: action === 'remove', unlock: action === 'unlock',
-            }, chat.length - 1);
-            store.sourceSignatures = chat.map(messageSignature);
-            invalidateContextCache(store);
-            await persistMemoryDatabaseChange();
-        } catch (error) { toastr.error(error.message, 'Summaryception'); }
-    };
-    $('#sc_state_pin').on('click', () => correct('pin'));
-    $('#sc_state_remove').on('click', () => correct('remove'));
-    $('#sc_state_unlock').on('click', () => correct('unlock'));
-    $('#sc_state_extract').on('click', async () => {
-        if (isSummarizing) { toastr.warning('A memory run is already active. Use Stop to pause it first.', 'Summaryception'); return; }
-        if (!getSettings().enabled || getSettings().pauseSummarization) {
-            toastr.warning('Enable Summaryception and unpause processing to extract missing facts.', 'Summaryception'); return;
-        }
-        await extractMissingFacts();
-    });
-    $('#sc_state_rebuild').on('click', async () => {
-        if (!getSettings().structuredStateEnabled) return;
-        if (isSummarizing) { toastr.warning('Stop the current run before rebuilding.', 'Summaryception'); return; }
-        if (!confirm('Rebuild the active bank from original chat messages? This clears its summaries, state, and manual pins. Export first if needed. The verbatim window is preserved.')) return;
-        const target = captureMemoryTarget();
-        await clearActiveMemory();
-        if (!targetIsCurrent(target)) return;
-        const turns = unsummarizedTurns(target.chat, target.store);
-        if (turns.length > getSettings().verbatimTurns) await runCatchup(turns, turns.length - getSettings().verbatimTurns);
-    });
-}
-
-
 function bindUIEvents() {
     $('#sc_enabled').on('change', async function () {
         abortSummarization();
@@ -3045,7 +2849,6 @@ function bindUIEvents() {
                 'Summaryception',
                 { timeOut: 3000 }
             );
-            scheduleFactBackfill(true);
         }
     });
 
@@ -3082,7 +2885,6 @@ function bindUIEvents() {
         saveSettings();
     });
 
-    bindStateUI();
     bindCustomPromptUI();
 
     $('#sc_reset_defaults').on('click', async () => {
@@ -3196,6 +2998,12 @@ function bindUIEvents() {
         saveSettings();
     });
 
+    $('#sc_injection_debug_overlay_enabled').on('change', function () {
+        getSettings().injectionDebugOverlay = $(this).prop('checked');
+        saveSettings();
+        updateInjectionDebugOverlay();
+    });
+
     $('#sc_trace_mode').on('change', function () {
         getSettings().traceMode = $(this).prop('checked');
         saveSettings();
@@ -3256,16 +3064,18 @@ function bindUIEvents() {
         }
     });
 
-    $('#sc_stop_summarize').on('click', function () {
-        if (!isSummarizing && !currentAbortController) {
-            toastr.info('Nothing is running.', 'Summaryception');
-            return;
-        }
+    $('#sc_stop_summarize, #sc_cancel_backlog').on('click', function () {
+        if (!isSummarizing) return;
         abortSummarization();
-        toastr.warning('Summarization stopped. Progress has been saved.', 'Summaryception', { timeOut: 4000 });
-        $(this).prop('disabled', true);
-        setTimeout(() => $(this).prop('disabled', false), 2000);
-        updateUI();
+        toastr.info('Canceling summarization. Completed backlog batches are kept.', 'Summaryception');
+    });
+
+    $('#sc_regenerate_latest').on('click', async () => {
+        const snippets = getChatStore().layers.flat().filter(sn => sn.turnRange)
+            .sort((a, b) => a.turnRange[1] - b.turnRange[1]);
+        const all = $('#sc_regenerate_scope').val() === 'all';
+        if (all && snippets.length && !confirm(`Regenerate all ${snippets.length} summaries from original messages using the current prompt? This uses one call per snippet; originals are kept if canceled or failed.`)) return;
+        await regenerateSnippets(all ? snippets : snippets.slice(-1));
     });
 
     $('#sc_refresh_preview').on('click', () => updateUI());
@@ -3770,13 +3580,20 @@ async function testOpenAIConnectionHandler() {
 }
 
 async function testCurrentConnectionHandler() {
-    const s = getSettings();
+    const s = structuredClone(getSettings());
     showConnectionStatus('loading', `Testing ${getConnectionDisplayName(s)}...`);
     const started = performance.now();
+    const request = new AbortController();
+    let timeout;
     try {
         const response = await Promise.race([
-            sendSummarizerRequest(s, 'You are a connection test assistant.', 'Reply with exactly: CONNECTION_OK'),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Connection test timed out')), s.summarizerTimeoutMs || defaultSettings.summarizerTimeoutMs)),
+            sendSummarizerRequest(s, 'You are a connection test assistant.', 'Reply with exactly: CONNECTION_OK', { signal: request.signal }),
+            new Promise((_, reject) => {
+                timeout = setTimeout(() => {
+                    request.abort();
+                    reject(new Error('Connection test timed out'));
+                }, s.summarizerTimeoutMs || defaultSettings.summarizerTimeoutMs);
+            }),
         ]);
         const elapsed = Math.round(performance.now() - started);
         showConnectionStatus('success', `OK in ${elapsed}ms: ${(response || '').trim().slice(0, 160)}`);
@@ -3784,6 +3601,8 @@ async function testCurrentConnectionHandler() {
     } catch (error) {
         showConnectionStatus('error', `Failed: ${error.message || error}`);
         toastr.error(`Connection test failed: ${error.message || error}`, 'Summaryception');
+    } finally {
+        clearTimeout(timeout);
     }
 }
 

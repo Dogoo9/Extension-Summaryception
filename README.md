@@ -4,7 +4,7 @@ This fork tracks [Lodactio's upstream Summaryception](https://github.com/Lodacti
 
 ### Layered Recursive Memory for SillyTavern
 
-> Layered narrative memory with a configurable context budget and optional structured fact tracking. Compression is lossy; continuity depends on the model, prompts, and budget.
+> Layered narrative memory with a configurable context budget. Compression is lossy; continuity depends on the model, prompts, and budget.
 
 Summaryception is a non-destructive, context-aware memory system for [SillyTavern](https://github.com/SillyTavern/SillyTavern) that replaces brute-force context stuffing with intelligent layered summarization. It keeps your most recent turns verbatim while compressing older conversation into ultra-compact summary snippets — organized in recursive layers with configurable depth and injection limits.
 
@@ -99,7 +99,7 @@ Each promotion merges 3 snippets into 1, so each layer multiplies turn coverage 
 | Layer 4 | 30 | 243 | 7,290 | ~2,100 |
 | **Total** | — | — | **~10,900 represented turns** | **~17,500 tokens** |
 
-> Theoretical represented ranges, not measured detail retention. The configured injection budget may omit stored snippets or facts.
+> Theoretical represented ranges, not measured detail retention. The configured injection budget may omit stored snippets.
 
 ### Conservative Estimate (smaller snippets at deeper layers)
 
@@ -203,9 +203,14 @@ All settings are adjustable from the SillyTavern Extensions panel:
 |---|---|---|
 | **Narrative State** (default) | Character RP, drama, thrillers, romance | Interactions, emotions, relationships, atmosphere, subtext |
 | **Game State** | Roguelites, strategy, mechanical games | Plot points, quests, locations, interactables, state changes |
+| **Concise Delta** | Small context budgets | Only consequential changes, at most eight phrases |
+| **Chronological Events** | Event-heavy stories | Ordered scene changes, causes, consequences |
+| **Relationships & Emotional Changes** | Character drama and romance | Trust, intimacy, conflict, commitments |
+| **Plot Threads & Goals** | Mysteries and campaigns | Introduced, advanced, and resolved threads |
+| **Continuity Recap** | General long-form RP | Balanced events, relationships, and continuity |
 | **Custom** | Your own prompt | Whatever you write |
 
-Select a preset from the dropdown in Summary Prompts, or edit the prompt directly — it auto-switches to Custom.
+Select a preset from the dropdown in Summary Prompts, or edit the prompt directly — it auto-switches to Custom. The new presets are original adaptations of recurring community approaches discussed in [What is your best summarization prompt?](https://www.reddit.com/r/SillyTavernAI/comments/1urjdn7/what_is_your_best_summarization_prompt/) and [Prompt for summaryception](https://www.reddit.com/r/SillyTavernAI/comments/1whc4fx/prompt_for_summaryception/): meaningful chronological changes, relationships, and unresolved threads. They keep the extension's incremental prior-context contract rather than requesting a full recap on each batch.
 
 Plus fully customizable:
 - 📝 Summarizer system prompt
@@ -256,12 +261,14 @@ Fork connection settings can be saved as named profiles, updated, duplicated, an
 
 - **Layer Stats** — Live view of snippet counts per layer, active character-card bank, and ghosted message count
 - **Injection Preview** — See exactly what gets sent to the LLM
+- **Injection Debug Overlay** — Opt-in floating view of the live registered block and its budget
+- **Regenerate Summaries** — Regenerate latest/all snippets from originals, including promoted source ranges
 - **Injection Inspector** — Verify the registered position, depth, role, and injected text
 - **Snippet Browser** — Browse, edit, and regenerate narrative snippets. Deletion rolls back dependent later memory and restores original messages for rebuilding.
 - **Memory Database Viewer** — Search and inspect every character bank, edit or delete snippets, export a bank, and inspect its raw JSON
 - **Export/Import** — Save and restore the active memory bank as JSON
 - **Force Summarize** — Manually trigger summarization; automatic/backlog processing preserves the verbatim window, while explicit single-batch force can summarize within it
-- **Stop** — Abort any running summarization, progress saved
+- **Stop / Cancel Backlog** — Abort the active run; completed backlog batches stay saved
 - **Repair** — Repair Summaryception-owned visibility while preserving manually hidden messages
 - **Saved Custom Prompts** — Save, load, delete, import, and export prompt text
 - **Reset to Defaults** — Reset settings while preserving chat memory and saved profiles/prompts
@@ -290,21 +297,25 @@ Restart SillyTavern and enable the extension.
 
 ---
 
-## 🧭 Optional Structured State
+## Narrative Memory and Compatibility
 
-Enable **Track facts alongside narrative summaries** to maintain a versioned snapshot per memory bank. Missing facts from already summarized original messages are extracted automatically on enable and chat/card activation, using additional calls to the configured summarizer. Afterwards, the same summary batch call returns a narrative summary and explicit fact updates/removals. No extra extraction call per reply is introduced. Promotions only compress narrative layers; they cannot overwrite the newer snapshot.
+Fact tracking has been removed: no fact extraction, catch-up calls, snapshot injection, or pin/correction controls remain. Older banks and imports still retain their narrative snippets, source ranges, signatures, and visibility ownership; retired `structuredState`, `lastFactBatch`, and snippet `recall` metadata are discarded during normalization. Export with the old version first if you want to keep those retired records.
 
-Facts cover location/time, present characters, relationships, important item ownership, injuries, goals, and durable information. Each fact has a stable ID and original-message source range. Missing facts are retained until explicitly removed. Complete JSON and all changes must validate before the narrative/state are committed together and source messages are hidden. Schema validation cannot establish factual truth; inspect snapshots and correct mistakes.
+Edits, swipes, deletions, and branches invalidate affected summaries across every bank. Original messages remain available for rebuilding. Budget selection retains whole snippets, counts injection wrappers, and leaves omitted snippets in storage. Generation uses SillyTavern's available tokenizer; previews may use a labeled four-characters-per-token estimate.
 
-Automatic fact catch-up preserves existing narrative layers, ghosting, and pinned corrections. It reads original messages, including those hidden by Summaryception, up to the current narrative cutoff; the recent verbatim window stays untouched. Each validated batch saves progress. **Stop** pauses the run, and **Extract Missing Facts** resumes from its last saved cutoff or retries after an invalid response. Re-enabling after text-only batches processes only the missing originals; older snapshots with partial starting coverage are replayed from zero. The feature is **off by default** and leaves custom text-only prompts usable. The UI and injection label coverage and cutoff; visible later messages take precedence. **Rebuild Active Memory** remains a separate operation that clears and replays summaries, state, and pins.
+### Cancellation and Regeneration
 
-Use **Pin Correction** to lock a fact, **Remove & Lock** to lock its absence, and **Unlock** to resume model updates. Corrections are anchored to the latest message. Edits, swipes, deletions, and branches invalidate affected memory across all banks, including inactive cards. Up to twelve state checkpoints are retained; when promotion or older edits prevent a safe aligned rollback, the affected bank is reset for rebuilding from original messages. Changes to a correction's source history remove that correction too.
+**Cancel Backlog** appears beside a progress bar while processing and in the progress toast. **Stop** also cancels batches, retries, promotions, and regeneration. Already committed batches finish saving their message visibility; later batches do not start. Use **Force Summarize Now** to resume from the saved cutoff. **Cancel** in the initial backlog dialog closes it without skipping or summarizing history.
 
-The state allowance defaults to **600 tokens**, adjustable from **400–800**, inside the total memory injection budget. Wrappers and labels count toward that total. Selection retains whole facts/snippets, keeps omitted content in storage, and reports overflow in the inspector. SillyTavern's available async tokenizer is measured before generation; previews can use the explicitly labeled four-characters-per-token fallback. Other extensions can still alter the final prompt/context allocation.
+Select **Latest summary** or **All summaries**, then **Regenerate Summaries** to use the current prompt on the original source messages. Each snippet also has a regenerate control, including promoted snippets with retained source ranges. Earlier context is bounded by the configured budget and excludes future summaries. Bulk regeneration stages replacements in chronological order and only commits after every response succeeds; cancellation or a model failure keeps the originals. It preserves layer structure, source ranges, and message visibility. Older snippets without source ranges can still be edited manually. A promoted snippet can cover a large original passage; if the backend rejects that input, the old summary is kept.
 
-Response JSON is larger than a plain summary. Increasing the response token limit may be necessary. Initial fact catch-up takes extra calls; routine updates stay within summary calls and can take longer to generate. Catch-up uses a dedicated fact prompt so custom narrative focus does not exclude items or injuries. It respects the extension's pause/disable controls and never retries invalid JSON in a background loop. Briefly cached KoboldCPP context lookups, cached source fingerprints, bounded prior context, and removal of redundant/restarted processing reduce avoidable work. Deterministic serialization does **not** guarantee KV-cache hits or a measured end-to-end speedup.
+### Injection Debug Overlay
 
-See [implementation and evaluation](docs/structured-state-plan.md) for test coverage, limitations, and a fixed on/off replay experiment. No real-model accuracy or latency gain has been measured yet.
+Enable **Advanced Settings → Show Injection Debug Overlay** when debugging. The floating panel shows the actual Summaryception block registered with SillyTavern, its position/depth/role, World Info scanning, measured or estimated tokens, and omitted snippets. It updates when the registered block changes and renders memory as plain text. The overlay defaults to off; closing it disables the setting. SillyTavern's Prompt Inspector remains the way to inspect the complete final prompt after other extensions have contributed.
+
+### Validation
+
+Run `npm ci` then `npm test` (Node.js with `--test-isolation=none` support). The suite covers request cancellation, saved backlog progress, atomic regeneration, source edits and card/chat switches, preset/custom prompts, overlay escaping and updates, legacy migration, whole-snippet budgets, tokenization/settings races, and connection timeout cleanup. Model responses are mocked; this does not establish real-model summary quality or validate a live SillyTavern installation.
 
 ---
 
