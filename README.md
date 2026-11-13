@@ -193,6 +193,7 @@ All settings are adjustable from the SillyTavern Extensions panel:
 |---|---|---|
 | Verbatim Turns | 10 | Recent assistant turns kept word-for-word |
 | Turns per Batch | 3 | Oldest turns summarized together per trigger |
+| Strict Verbatim Window | Off | Off: summarize only once a full batch is past the verbatim limit (window floats between Verbatim and Verbatim + Batch − 1), giving one call per batch and fewer prompt-prefix changes for backend caches. On: summarize every turn past the limit immediately |
 | Snippets per Layer | 30 | Max snippets before promoting to next layer |
 | Snippets per Promotion | 3 | How many snippets merge on promotion |
 | Max Layers | 5 | Maximum recursion depth |

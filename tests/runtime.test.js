@@ -8,11 +8,11 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 test('normal batch includes player lead-in, replaces all variables and preserves verbatim turns', async () => {
-    const r = runtime(); r.addTurns(3);
+    const r = runtime(); r.addTurns(5);
     r.api.getSettings().summarizerUserPrompt = '{{player_name}} / {{player_name}} / {{context_str}} / {{story_txt}}';
     await r.api.maybeSummarizeTurns();
     const store = r.api.getChatStore();
-    assert.deepEqual(plain(store.layers[0][0].turnRange), [0, 1]);
+    assert.deepEqual(plain(store.layers[0][0].turnRange), [0, 5]);
     assert.ok(r.requests[0][2].includes('Alex / Alex'));
     assert.ok(r.requests[0][2].includes('Player: Player action 0'));
     assert.equal(r.api.getAssistantTurns(r.ctx.chat).filter(t => t.index > store.summarizedUpTo).length, 2);
@@ -83,9 +83,10 @@ test('backlog summaries use every original player passage and keeps verbatim win
     const r = runtime({ turnsPerSummary: 2 }); r.addTurns(7);
     await r.api.runCatchup(r.api.getAssistantTurns(r.ctx.chat), 5);
     const store = r.api.getChatStore();
-    assert.deepEqual(plain(store.layers[0].map(s => s.turnRange)), [[0, 3], [4, 7], [8, 9]]);
+    // Automatic catch-up only writes full batches; the partial remainder floats in the verbatim window.
+    assert.deepEqual(plain(store.layers[0].map(s => s.turnRange)), [[0, 3], [4, 7]]);
     for (const [i, request] of r.requests.entries()) assert.ok(request[2].includes(`Player: Player action ${i * 2}`));
-    assert.equal(r.api.getAssistantTurns(r.ctx.chat).filter(t => t.index > store.summarizedUpTo).length, 2);
+    assert.equal(r.api.getAssistantTurns(r.ctx.chat).filter(t => t.index > store.summarizedUpTo).length, 3);
 });
 
 test('edits, swipe, deletion, branches repair every layer and inactive bank', async () => {
@@ -247,7 +248,7 @@ test('Cancel Backlog aborts the in-flight batch, keeps completed batches, and Fo
     const work = r.api.runCatchup(r.api.getAssistantTurns(r.ctx.chat), 5);
     while (r.requests.length < 2) await wait(10);
     assert.equal(r.$('#sc_backlog_progress')[0].style.display, '');
-    assert.ok(r.$('#sc_backlog_status').text().includes('1 / 3'));
+    assert.ok(r.$('#sc_backlog_status').text().includes('1 / 2'));
     await r.click('sc_cancel_backlog'); await work;
     assert.equal(r.requests[1][3].signal.aborted, true);
     assert.equal(r.api.getChatStore().layers[0].length, 1);
@@ -424,4 +425,57 @@ test('regeneration restores original snippets when persistence rejects the commi
     assert.equal(await r.api.regenerateSnippets(store.layers.flat()), false);
     assert.equal(JSON.stringify(store.layers), original);
     assert.equal(r.api.isMemoryRunning(), false);
+});
+
+test('steady state waits for a full batch past the verbatim window (hysteresis)', async () => {
+    const r = runtime({ verbatimTurns: 2, turnsPerSummary: 3 });
+    const covered = [];
+    for (let i = 0; i < 11; i++) {
+        r.addTurns(1, i);
+        await r.api.maybeSummarizeTurns();
+        const visible = r.api.getAssistantTurns(r.ctx.chat).filter(t => t.index > r.api.getChatStore().summarizedUpTo).length;
+        assert.ok(visible >= Math.min(2, i + 1) && visible <= 4, `visible window ${visible} after turn ${i}`);
+        covered.push(r.requests.length);
+    }
+    // 11 turns, 2 verbatim: 9 overflow turns -> exactly 3 calls, each covering 3 assistant turns.
+    assert.equal(r.requests.length, 3);
+    for (const sn of r.api.getChatStore().layers[0]) assert.equal(sn.turnRange[1] - sn.turnRange[0] + 1, 6);
+    assert.deepEqual(covered, [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3]);
+});
+
+test('strictVerbatimWindow restores one-summary-per-turn behaviour', async () => {
+    const r = runtime({ verbatimTurns: 2, turnsPerSummary: 3, strictVerbatimWindow: true });
+    for (let i = 0; i < 6; i++) { r.addTurns(1, i); await r.api.maybeSummarizeTurns(); }
+    assert.equal(r.requests.length, 4);
+    assert.equal(r.api.getAssistantTurns(r.ctx.chat).filter(t => t.index > r.api.getChatStore().summarizedUpTo).length, 2);
+});
+
+test('Force Summarize still drains a partial batch down to the verbatim window', async () => {
+    const r = runtime({ verbatimTurns: 2, turnsPerSummary: 3 }); r.addTurns(4); r.api.bindUIEvents();
+    await r.api.maybeSummarizeTurns();
+    assert.equal(r.requests.length, 0);
+    await r.click('sc_force_summarize');
+    assert.equal(r.requests.length, 1);
+    assert.equal(r.api.getAssistantTurns(r.ctx.chat).filter(t => t.index > r.api.getChatStore().summarizedUpTo).length, 2);
+});
+
+test('default-connection prompt toggles are restored during retry backoff', async () => {
+    const r = runtime({ connectionSource: 'default', verbatimTurns: 1, turnsPerSummary: 1 }); r.addTurns(2);
+    const entries = [{ identifier: 'main', enabled: true }, { identifier: 'nsfw', enabled: true }];
+    r.ctx.promptManager = { getPromptCollection: () => ({ collection: entries.map(e => ({ identifier: e.identifier })) }), getPromptOrderEntries: () => entries };
+    const seen = [];
+    let backoffState;
+    r.respond(async () => {
+        seen.push(entries.map(e => e.enabled));
+        if (seen.length === 1) {
+            setTimeout(() => { backoffState = entries.map(e => e.enabled); }, 20);
+            throw Object.assign(new Error('busy'), { retryable: true, retryAfter: 0.1 });
+        }
+        return 'Recovered summary.';
+    });
+    await r.api.maybeSummarizeTurns();
+    assert.deepEqual(seen, [[false, false], [false, false]]);
+    assert.deepEqual(backoffState, [true, true]);
+    assert.deepEqual(entries.map(e => e.enabled), [true, true]);
+    assert.equal(r.api.getChatStore().layers[0].length, 1);
 });

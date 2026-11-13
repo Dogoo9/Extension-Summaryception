@@ -377,6 +377,14 @@
                         </div>
                     </div>
 
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_strict_verbatim_window">
+                            <input type="checkbox" id="sc_strict_verbatim_window" />
+                            <span>Strict Verbatim Window</span>
+                            <small class="sc-hint">Off (recommended): wait until a full batch is past the verbatim limit, so up to Verbatim + Batch − 1 turns stay visible. Fewer summarizer calls, and the prompt start changes once per batch, which keeps backend prompt caches valid longer. On: summarize every turn past the limit immediately (one call per reply).</small>
+                        </label>
+                    </div>
+
                     <hr class="sc-divider" />
 
                     <!-- Layer Settings -->

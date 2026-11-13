@@ -113,6 +113,10 @@ const defaultSettings = Object.freeze({
     enabled: true,
     verbatimTurns: 10,
     turnsPerSummary: 3,
+    // false = hysteresis: the verbatim window floats between verbatimTurns and
+    // verbatimTurns + turnsPerSummary - 1, so each summarizer call covers a full
+    // batch and the prompt prefix changes once per batch instead of every turn.
+    strictVerbatimWindow: false,
     snippetsPerLayer: 30,
     snippetsPerPromotion: 3,
     maxLayers: 5,
@@ -1236,6 +1240,7 @@ function cleanSummarizerOutput(raw) {
 // ─── Core: Summarization State ───────────────────────────────────────
 
 let isSummarizing = false;
+let promptTogglesHeld = false;
 let catchupDismissed = false;
 let currentAbortController = null;
 let activeRun = null;
@@ -1333,8 +1338,22 @@ async function callSummarizer(storyTxt, contextStr, extraInstructions = '') {
         + (extraInstructions ? `\n\n${extraInstructions}` : '');
     const systemPrompt = s.summarizerSystemPrompt;
     const defaultMode = !s.connectionSource || s.connectionSource === 'default';
-    const snapshot = defaultMode ? snapshotPromptToggles() : null;
-    if (defaultMode) disableAllPromptToggles();
+    // Default mode borrows the user's live connection and prompt manager. Hold the
+    // toggles disabled only while a request is in flight, never during backoff, so
+    // a user generation in that window still gets the full preset.
+    let snapshot = null;
+    const holdToggles = () => {
+        if (!defaultMode || snapshot) return;
+        snapshot = snapshotPromptToggles();
+        disableAllPromptToggles();
+        promptTogglesHeld = true;
+    };
+    const releaseToggles = () => {
+        if (!snapshot) return;
+        restorePromptToggles(snapshot);
+        snapshot = null;
+        promptTogglesHeld = false;
+    };
     const parent = currentAbortController?.signal;
     let lastError;
     try {
@@ -1352,6 +1371,7 @@ async function callSummarizer(storyTxt, contextStr, extraInstructions = '') {
                         reject(new Error(`Request timed out after ${Math.round(timeout / 1000)}s`));
                     }, timeout);
                 });
+                holdToggles();
                 const raw = await Promise.race([
                     sendSummarizerRequest(s, systemPrompt, prompt, { signal: request.signal }), cancelled,
                 ]);
@@ -1366,6 +1386,7 @@ async function callSummarizer(storyTxt, contextStr, extraInstructions = '') {
                 const delay = Math.min(parseRetryAfter(error) ?? (RETRY_CONFIG.baseDelay * 2 ** attempt + Math.random() * RETRY_CONFIG.baseDelay), RETRY_CONFIG.maxDelay);
                 toastr.warning(`Summarizer request failed. Retrying in ${(delay / 1000).toFixed(1)}s.`, 'Summaryception', { timeOut: delay });
                 // Clean the request resources before backoff, then use the run's signal.
+                releaseToggles();
                 clearTimeout(timer);
                 parent?.removeEventListener('abort', onAbort);
                 await delayWithSignal(delay, parent);
@@ -1378,7 +1399,7 @@ async function callSummarizer(storyTxt, contextStr, extraInstructions = '') {
         toastr.error(`Summarization failed: ${lastError?.message || 'unknown error'}. Source messages kept for retry.`, 'Summaryception', { timeOut: 8000 });
         return '';
     } finally {
-        if (snapshot) restorePromptToggles(snapshot);
+        releaseToggles();
     }
 }
 
@@ -1415,7 +1436,10 @@ async function maybeSummarizeTurns() {
         catchupDismissed = true;
         return summarizeOneBatch(visible.slice(0, overflow));
     }
-    // Preserve the configured verbatim window, even when overflow < batch size.
+    // Hysteresis: wait for a full batch. Summarizing one turn per reply costs a
+    // summarizer call per turn and changes the prompt prefix (memory block and
+    // oldest visible message) on every generation, defeating backend prompt caching.
+    if (!s.strictVerbatimWindow && overflow < s.turnsPerSummary) return;
     await summarizeOneBatch(visible.slice(0, overflow));
 }
 
@@ -1470,11 +1494,18 @@ async function summarizeOneBatchFromTurns(visibleTurns, run = activeRun) {
     return true;
 }
 
-async function runCatchup(visibleTurns, overflow) {
+/**
+ * @param {boolean} [drain] Summarize down to exactly verbatimTurns, including a
+ *   final partial batch (explicit Force Summarize). Otherwise automatic catch-up
+ *   leaves a partial remainder in the floating verbatim window, unless
+ *   strictVerbatimWindow is enabled.
+ */
+async function runCatchup(visibleTurns, overflow, drain = false) {
     const run = beginSummarization();
     if (!run) return;
     const s = getSettings();
-    const total = Math.ceil(overflow / s.turnsPerSummary);
+    const fullOnly = !drain && !s.strictVerbatimWindow;
+    const total = Math.max(1, fullOnly ? Math.floor(overflow / s.turnsPerSummary) : Math.ceil(overflow / s.turnsPerSummary));
     let completed = 0;
     run.backlog = { completed, total };
     updateProcessingUI();
@@ -1491,7 +1522,7 @@ async function runCatchup(visibleTurns, overflow) {
         while (runIsCurrent(run)) {
             const turns = unsummarizedTurns(run.target.chat, run.target.store);
             const remaining = turns.length - s.verbatimTurns;
-            if (remaining <= 0) break;
+            if (remaining <= 0 || (fullOnly && remaining < s.turnsPerSummary)) break;
             if (!await summarizeOneBatchFromTurns(turns.slice(0, remaining), run)) break;
             completed++;
             run.backlog.completed = completed;
@@ -1500,7 +1531,8 @@ async function runCatchup(visibleTurns, overflow) {
             await delayWithSignal(TUNING.catchupInterBatchDelay, run.controller.signal);
         }
         if (targetIsCurrent(run.target)) {
-            const stopped = run.controller.signal.aborted || unsummarizedTurns(run.target.chat, run.target.store).length > s.verbatimTurns;
+            const left = unsummarizedTurns(run.target.chat, run.target.store).length - s.verbatimTurns;
+            const stopped = run.controller.signal.aborted || left >= (fullOnly ? s.turnsPerSummary : 1);
             toastr.info(`${stopped ? 'Catch-up paused' : 'Catch-up complete'}: ${completed} batches saved.`, 'Summaryception');
         }
     } catch (error) {
@@ -1838,7 +1870,10 @@ function onChatChanged() {
     }, 100);
 }
 
-async function onGenerationStarted() {
+async function onGenerationStarted(type, options, dryRun) {
+    if (promptTogglesHeld && type && !dryRun && type !== 'quiet') {
+        toastr.warning('A summary request is using the default connection with prompt toggles temporarily disabled. This reply may be missing your preset prompts; wait for the summary or use a dedicated summarizer connection.', 'Summaryception', { timeOut: 8000 });
+    }
     updateInjection();
     if (!getSettings().enabled) return;
     const ctx = SillyTavern.getContext();
@@ -1957,6 +1992,7 @@ function updateUI() {
         $('#sc_enabled').prop('checked', s.enabled);
         $('#sc_pause_summarization').prop('checked', s.pauseSummarization);
         $('#sc_disable_ghosting').prop('checked', s.disableGhosting);
+        $('#sc_strict_verbatim_window').prop('checked', s.strictVerbatimWindow);
         $('#sc_separate_by_character').prop('checked', s.separateMemoryByCharacterCard);
         $('#sc_verbatim_turns').val(s.verbatimTurns);
         $('#sc_verbatim_turns_val').text(s.verbatimTurns);
@@ -2852,6 +2888,11 @@ function bindUIEvents() {
         }
     });
 
+    $('#sc_strict_verbatim_window').on('change', function () {
+        getSettings().strictVerbatimWindow = $(this).prop('checked');
+        saveSettings();
+    });
+
     $('#sc_disable_ghosting').on('change', async function () {
         abortSummarization();
         getSettings().disableGhosting = $(this).prop('checked');
@@ -3054,7 +3095,7 @@ function bindUIEvents() {
         $(this).prop('disabled', true).text(' Working…');
         try {
             catchupDismissed = true;
-            if (turns.length > s.verbatimTurns) await runCatchup(turns, turns.length - s.verbatimTurns);
+            if (turns.length > s.verbatimTurns) await runCatchup(turns, turns.length - s.verbatimTurns, true);
             else if (turns.length) await summarizeOneBatch(turns); // Explicit force may use the verbatim window.
             else toastr.info('Nothing to summarize.', 'Summaryception');
         } finally {
