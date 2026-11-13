@@ -475,6 +475,22 @@
                         </div>
                     </div>
 
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_promotion_name_check">
+                            <input type="checkbox" id="sc_promotion_name_check" />
+                            <span>Check Names on Promotion</span>
+                            <small class="sc-hint">Before saving a merged snippet, check that names from the merged snippets survived. If too many are missing, retry once listing them; if it still drops them, keep the result and mark the snippet as lossy in the browser and database viewer. Costs one extra call only when a check fails.</small>
+                        </label>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_protected_names">
+                            <span>Protected Names</span>
+                            <small class="sc-hint">One per line or comma-separated (e.g. your main characters and places). When a protected name appears in the snippets being merged, the merged snippet must keep it. Other capitalized names are checked heuristically, allowing a quarter of them to drop.</small>
+                        </label>
+                        <textarea id="sc_protected_names" class="text_pole sc-textarea" rows="3"></textarea>
+                    </div>
+
                     <hr class="sc-divider" />
 
                     <!-- Prompts -->

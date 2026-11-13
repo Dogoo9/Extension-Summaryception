@@ -479,3 +479,54 @@ test('default-connection prompt toggles are restored during retry backoff', asyn
     assert.deepEqual(entries.map(e => e.enabled), [true, true]);
     assert.equal(r.api.getChatStore().layers[0].length, 1);
 });
+
+const promotionSetup = (settings = {}) => {
+    const r = runtime({ snippetsPerLayer: 2, snippetsPerPromotion: 2, maxLayers: 3, ...settings }); r.addTurns(4);
+    const store = r.api.getChatStore();
+    store.layers = [[
+        { text: 'Alex meets Mara at Saltmarsh; Captain Renn watches.', turnRange: [2, 3] },
+        { text: 'Mara hands Alex the key; Renn follows them to Gullhaven.', turnRange: [4, 5] },
+        { text: 'Alex rests.', turnRange: [6, 7] },
+    ], [{ text: 'Seed history.', turnRange: [0, 1] }]];
+    store.summarizedUpTo = 7;
+    return { r, store };
+};
+const promote = async r => {
+    const run = r.api.beginSummarization();
+    try { await r.api.maybePromoteLayer(0, run); } finally { r.api.finishSummarization(run); }
+};
+
+test('promotion retries once with the missing names and accepts the fixed text', async () => {
+    const { r, store } = promotionSetup({ protectedNames: 'Mara' });
+    r.respond(async () => r.requests.length === 1 ? 'Alex got a key.' : 'Alex met Mara at Saltmarsh; Mara gave the key; Captain Renn followed to Gullhaven.');
+    await promote(r);
+    assert.equal(r.requests.length, 2);
+    assert.ok(r.requests[1][2].includes('Mara'));
+    const merged = store.layers[1].at(-1);
+    assert.equal(merged.text, 'Alex met Mara at Saltmarsh; Mara gave the key; Captain Renn followed to Gullhaven.');
+    assert.equal(merged.lossy, undefined);
+});
+
+test('promotion keeps a still-lossy result but flags it with the missing names', async () => {
+    const { r, store } = promotionSetup({ protectedNames: 'Mara' });
+    r.respond(async () => 'Alex got a key.');
+    await promote(r);
+    assert.equal(r.requests.length, 2);
+    const merged = store.layers[1].at(-1);
+    assert.equal(merged.text, 'Alex got a key.');
+    assert.equal(merged.lossy, true);
+    assert.ok(merged.missingNames.includes('Mara'));
+    assert.deepEqual(plain(merged.turnRange), [2, 5]);
+});
+
+test('promotion name check can be disabled and passes clean output without a retry', async () => {
+    const off = promotionSetup({ promotionNameCheck: false, protectedNames: 'Mara' });
+    off.r.respond(async () => 'Alex got a key.');
+    await promote(off.r);
+    assert.equal(off.r.requests.length, 1);
+    assert.equal(off.store.layers[1].at(-1).lossy, undefined);
+    const clean = promotionSetup();
+    clean.r.respond(async () => 'Alex met Mara at Saltmarsh; Captain Renn trailed them to Gullhaven with the key.');
+    await promote(clean.r);
+    assert.equal(clean.r.requests.length, 1);
+});

@@ -18,6 +18,7 @@ import {
 } from './connectionutil.js';
 import { messageSignature, firstSourceChange } from './source-signatures.js';
 import { createMeter, assembleBudgetedMemory, assembleBudgetedMemoryAsync } from './memory-budget.js';
+import { checkNameRetention, parseNameList } from './name-check.js';
 
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
@@ -110,6 +111,8 @@ const defaultSettings = Object.freeze({
     snippetsPerLayer: 30,
     snippetsPerPromotion: 3,
     maxLayers: 5,
+    promotionNameCheck: true,             // retry a promotion once when it drops names from its inputs
+    protectedNames: '',                   // newline/comma list of names a promotion must keep when present
     contextBudget: 4096,
     contextBudgetUnit: 'tokens',          // 'tokens' (estimated at 4 chars each) | 'characters'
     savedCustomPrompts: [],
@@ -1629,13 +1632,31 @@ async function maybePromoteLayer(layerIndex, run = activeRun) {
         // canceled promotion cannot temporarily remove history or need a rollback.
         const toMerge = layer.slice(0, s.snippetsPerPromotion);
         const transaction = captureTransaction(run.target, store.summarizedUpTo);
-        const text = await callSummarizer(toMerge.map(snippetText).join(' '), buildFullContext(layerIndex + 1),
-            'This is historical memory promotion. Preserve identities, durable facts and unresolved threads. Keep events chronological. Do not describe this older passage as the current scene.');
+        const inputs = toMerge.map(snippetText);
+        const passage = inputs.join(' ');
+        const context = buildFullContext(layerIndex + 1);
+        const instructions = 'This is historical memory promotion. Preserve identities, durable facts and unresolved threads. Keep events chronological. Do not describe this older passage as the current scene.';
+        let text = await callSummarizer(passage, context, instructions);
         if (!text || !runIsCurrent(run) || !transactionIsCurrent(transaction)) return;
+        // Deterministic quality gate: deep layers tend to squeeze names out.
+        const checkOptions = { protectedNames: parseNameList(s.protectedNames) };
+        let check = s.promotionNameCheck ? checkNameRetention(inputs, text, checkOptions) : null;
+        if (check && !check.ok) {
+            log(`Promotion from L${layerIndex} dropped names: ${check.missing.join(', ')}. Retrying once.`);
+            const names = check.missing.slice(0, 30).join(', ');
+            const retry = await callSummarizer(passage, context,
+                `${instructions} The merged memories name the following, and your output must keep every one of them: ${names}.`);
+            if (!runIsCurrent(run) || !transactionIsCurrent(transaction)) return;
+            if (retry) {
+                const retryCheck = checkNameRetention(inputs, retry, checkOptions);
+                if (retryCheck.missing.length <= check.missing.length) { text = retry; check = retryCheck; }
+            }
+        }
         const ranges = toMerge.map(sn => sn.turnRange).filter(Boolean);
         layer.splice(0, toMerge.length);
         destLayer.push({ text, fromLayer: layerIndex, mergedCount: toMerge.length, timestamp: Date.now(),
             ...(ranges.length === toMerge.length ? { turnRange: [Math.min(...ranges.map(r => r[0])), Math.max(...ranges.map(r => r[1]))] } : {}),
+            ...(check && !check.ok ? { lossy: true, missingNames: check.missing } : {}),
         });
         invalidateContextCache(store);
     }
@@ -1984,6 +2005,8 @@ function updateUI() {
         $('#sc_pause_summarization').prop('checked', s.pauseSummarization);
         $('#sc_disable_ghosting').prop('checked', s.disableGhosting);
         $('#sc_strict_verbatim_window').prop('checked', s.strictVerbatimWindow);
+        $('#sc_promotion_name_check').prop('checked', s.promotionNameCheck);
+        $('#sc_protected_names').val(s.protectedNames || '');
         $('#sc_separate_by_character').prop('checked', s.separateMemoryByCharacterCard);
         $('#sc_verbatim_turns').val(s.verbatimTurns);
         $('#sc_verbatim_turns_val').text(s.verbatimTurns);
@@ -2222,7 +2245,8 @@ function buildMemoryDatabaseHtml(snapshot) {
                             ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
                             : 'meta';
                     const timestamp = sn.timestamp ? new Date(sn.timestamp).toLocaleString() : 'unknown time';
-                    const flags = [sn.promoted ? 'promoted' : '', sn.regenerated ? 'regenerated' : '', sn.edited ? 'edited' : '']
+                    const flags = [sn.promoted ? 'promoted' : '', sn.regenerated ? 'regenerated' : '', sn.edited ? 'edited' : '',
+                        sn.lossy ? `lossy: dropped ${(sn.missingNames || []).join(', ') || 'names'}` : '']
                         .filter(Boolean)
                         .join(', ');
                     return `
@@ -2414,6 +2438,8 @@ function showMemoryDatabaseModal() {
 
             snippet.text = newText;
             snippet.edited = true;
+            delete snippet.lossy;
+            delete snippet.missingNames;
             snippet.editedAt = new Date().toISOString();
             invalidateContextCache(getMemoryStoreByKey(bankKey));
             await persistMemoryDatabaseChange();
@@ -2572,7 +2598,8 @@ function updateSnippetBrowser() {
                     : sn.mergedCount
                         ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
                         : '';
-                const seedStr = sn.promoted ? ' 🌱' : '';
+                const seedStr = (sn.promoted ? ' 🌱' : '')
+                    + (sn.lossy ? ` ⚠️ dropped: ${escapeHtml((sn.missingNames || []).join(', ') || 'names')}` : '');
                 const canRedo = Boolean(sn.turnRange);
                 const redoBtn = canRedo
                     ? `<button class="sc-snippet-redo menu_button fa-solid fa-rotate-right" title="Regenerate this snippet"></button>`
@@ -2702,7 +2729,11 @@ async function regenerateSnippets(snippets) {
             $(toast).find('.toast-message').text(`Regenerating summaries: ${replacements.size} / ${ordered.length} — Use Stop to cancel`);
         }
         const originals = new Map([...replacements.keys()].map(sn => [sn, { ...sn }]));
-        for (const [sn, text] of replacements) Object.assign(sn, { text, timestamp: Date.now(), regenerated: true });
+        for (const [sn, text] of replacements) {
+            Object.assign(sn, { text, timestamp: Date.now(), regenerated: true });
+            delete sn.lossy;
+            delete sn.missingNames;
+        }
         invalidateContextCache(target.store);
         const committedRevision = storeRevisions.get(target.store);
         try {
@@ -2877,6 +2908,16 @@ function bindUIEvents() {
                 { timeOut: TUNING.toastMedium }
             );
         }
+    });
+
+    $('#sc_promotion_name_check').on('change', function () {
+        getSettings().promotionNameCheck = $(this).prop('checked');
+        saveSettings();
+    });
+
+    $('#sc_protected_names').on('change', function () {
+        getSettings().protectedNames = String($(this).val() || '');
+        saveSettings();
     });
 
     $('#sc_strict_verbatim_window').on('change', function () {

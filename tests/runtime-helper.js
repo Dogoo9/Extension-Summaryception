@@ -4,6 +4,7 @@ import { JSDOM } from 'jsdom';
 import jquery from 'jquery';
 import * as sources from '../source-signatures.js';
 import * as budget from '../memory-budget.js';
+import * as names from '../name-check.js';
 
 export function runtime(settings = {}, includeInit = false) {
     const dom = new JSDOM(readFileSync(new URL('../settings.html', import.meta.url), 'utf8'), { url: 'https://sillytavern.local/' });
@@ -34,7 +35,7 @@ export function runtime(settings = {}, includeInit = false) {
         messages.push({ type, text }); return $('<div><div class="toast-message"></div></div>');
     }])); toaster.clear = () => {};
     const globals = {
-        ...sources, ...budget, $, document: dom.window.document, navigator: dom.window.navigator,
+        ...sources, ...budget, ...names, $, document: dom.window.document, navigator: dom.window.navigator,
         Option: dom.window.Option, Blob, URL, crypto, AbortController, DOMException, performance,
         structuredClone, setTimeout, clearTimeout, console: { log() {}, warn() {}, error() {} },
         confirm: () => true, prompt: () => 'Test profile', toastr: toaster,

@@ -197,6 +197,8 @@ All settings are adjustable from the SillyTavern Extensions panel:
 | Snippets per Layer | 30 | Max snippets before promoting to next layer |
 | Snippets per Promotion | 3 | How many snippets merge on promotion |
 | Max Layers | 5 | Maximum recursion depth |
+| Check Names on Promotion | On | Before saving a merged snippet, verify names from its inputs survived; retry once listing the missing ones, else keep it and mark it lossy |
+| Protected Names | (empty) | Names (one per line or comma-separated) a promotion must keep whenever they appear in the merged snippets |
 
 ### Prompt Presets
 
