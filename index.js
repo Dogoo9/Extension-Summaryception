@@ -39,7 +39,6 @@ const TUNING = Object.freeze({
     retryBackoffMultiplier:   2,        // exponential growth factor
     retryableStatuses:        [429, 500, 502, 503, 504],
     llmRequestTimeout:        120_000,  // ms — per-request hard timeout
-    consecutiveFailureLimit:  3,        // catchup aborts after this many failures in a row
 
     // ── Backlog / Catchup ──────────────────────────────────────────
     backlogMultiplier:        2,        // overflow > turnsPerSummary × this triggers catchup dialog
@@ -50,22 +49,13 @@ const TUNING = Object.freeze({
     catchupInterBatchDelay:   200,      // ms — breathing room between catchup batches
 
     // ── Progress Reporting ─────────────────────────────────────────
-    ghostProgressInterval:    10,       // update toast every N messages during ghost/unghost
-    repairProgressInterval:   5,        // update toast every N messages during repair scan
-
-    // ── Injection Position ─────────────────────────────────────────
-    // setExtensionPrompt(name, text, position, depth, scan, role)
-    injectionPosition:        1,        // 0 = system prompt, 1 = in-chat
-    injectionDepth:           12,       // messages from generation point
-    injectionScan:            false,    // watched by World Info?
-    injectionRole:            1,        // 0 = system, 1 = user, 2 = assistant
+    ghostProgressInterval:    10,       // update toast every N messages during unghost
 
     // ── Toast Durations (ms) ───────────────────────────────────────
     // Named by intent so you can tune notification verbosity in one place.
     toastShort:               1_500,
     toastDefault:             2_000,
     toastMedium:              3_000,
-    toastLong:                4_000,
     toastLonger:              5_000,
     toastExtended:            6_000,
     toastError:               8_000,
@@ -902,7 +892,7 @@ async function unghostAllMessages(storeOverride = null) {
             }
 
             processed++;
-            if (processed % 10 === 0 || processed === toUnhide.length) {
+            if (processed % TUNING.ghostProgressInterval === 0 || processed === toUnhide.length) {
                 const pct = Math.round((processed / toUnhide.length) * 100);
                 $(progressToast).find('.toast-message').text(
                     `Unhiding messages: ${processed} / ${toUnhide.length} (${pct}%)`
@@ -1031,7 +1021,7 @@ async function repairIfBranched() {
         await saveChatStore();
         const ctx = SillyTavern.getContext();
         if (ctx.saveChat) await ctx.saveChat();
-        toastr.info('Changed source messages detected. Affected memories were rolled back; original messages are available for rebuilding.', 'Summaryception', { timeOut: 6000 });
+        toastr.info('Changed source messages detected. Affected memories were rolled back; original messages are available for rebuilding.', 'Summaryception', { timeOut: TUNING.toastExtended });
     }
 }
 
@@ -1383,7 +1373,7 @@ async function callSummarizer(storyTxt, contextStr, extraInstructions = '') {
                 lastError = error;
                 if (parent?.aborted || error.name === 'AbortError') return '';
                 if (!(error.retryable === true || isRetryableError(error)) || attempt === RETRY_CONFIG.maxRetries) break;
-                const delay = Math.min(parseRetryAfter(error) ?? (RETRY_CONFIG.baseDelay * 2 ** attempt + Math.random() * RETRY_CONFIG.baseDelay), RETRY_CONFIG.maxDelay);
+                const delay = Math.min(parseRetryAfter(error) ?? (RETRY_CONFIG.baseDelay * RETRY_CONFIG.backoffMultiplier ** attempt + Math.random() * RETRY_CONFIG.baseDelay), RETRY_CONFIG.maxDelay);
                 toastr.warning(`Summarizer request failed. Retrying in ${(delay / 1000).toFixed(1)}s.`, 'Summaryception', { timeOut: delay });
                 // Clean the request resources before backoff, then use the run's signal.
                 releaseToggles();
@@ -1396,7 +1386,7 @@ async function callSummarizer(storyTxt, contextStr, extraInstructions = '') {
             }
         }
         console.error(LOG_PREFIX, 'Summarization failed:', lastError);
-        toastr.error(`Summarization failed: ${lastError?.message || 'unknown error'}. Source messages kept for retry.`, 'Summaryception', { timeOut: 8000 });
+        toastr.error(`Summarization failed: ${lastError?.message || 'unknown error'}. Source messages kept for retry.`, 'Summaryception', { timeOut: TUNING.toastError });
         return '';
     } finally {
         releaseToggles();
@@ -1414,6 +1404,7 @@ async function maybeSummarizeTurns() {
     const s = getSettings();
     if (!s.enabled || s.pauseSummarization || isSummarizing) return;
     const target = captureMemoryTarget();
+    if (s.debugMode && s.traceMode) debugVisibleTurns(target.chat, target.store);
     const visible = unsummarizedTurns(target.chat, target.store);
     const overflow = visible.length - s.verbatimTurns;
     if (overflow <= 0) return;
@@ -1815,7 +1806,7 @@ function updateInjection() {
         return true;
     } catch (e) {
         console.error(LOG_PREFIX, 'updateInjection error:', e);
-        toastr.error(`Summary injection failed: ${e.message || e}`, 'Summaryception', { timeOut: 8000 });
+        toastr.error(`Summary injection failed: ${e.message || e}`, 'Summaryception', { timeOut: TUNING.toastError });
         return false;
     }
 }
@@ -1867,12 +1858,12 @@ function onChatChanged() {
         if (epoch !== chatEpoch) return;
         updateInjection();
         updateUI();
-    }, 100);
+    }, TUNING.chatChangedDelay);
 }
 
 async function onGenerationStarted(type, options, dryRun) {
     if (promptTogglesHeld && type && !dryRun && type !== 'quiet') {
-        toastr.warning('A summary request is using the default connection with prompt toggles temporarily disabled. This reply may be missing your preset prompts; wait for the summary or use a dedicated summarizer connection.', 'Summaryception', { timeOut: 8000 });
+        toastr.warning('A summary request is using the default connection with prompt toggles temporarily disabled. This reply may be missing your preset prompts; wait for the summary or use a dedicated summarizer connection.', 'Summaryception', { timeOut: TUNING.toastError });
     }
     updateInjection();
     if (!getSettings().enabled) return;
@@ -2409,7 +2400,7 @@ function showMemoryDatabaseModal() {
 
             if (!bankKey || Number.isNaN(layerIndex) || Number.isNaN(snippetIndex) || !textarea) return;
             if (!newText) {
-                toastr.warning('Memory text cannot be empty.', 'Summaryception', { timeOut: 2000 });
+                toastr.warning('Memory text cannot be empty.', 'Summaryception', { timeOut: TUNING.toastDefault });
                 textarea.focus();
                 return;
             }
@@ -2427,7 +2418,7 @@ function showMemoryDatabaseModal() {
             invalidateContextCache(getMemoryStoreByKey(bankKey));
             await persistMemoryDatabaseChange();
             refreshDatabaseView();
-            toastr.success(`Memory updated in Layer ${layerIndex}.`, 'Summaryception', { timeOut: 2000 });
+            toastr.success(`Memory updated in Layer ${layerIndex}.`, 'Summaryception', { timeOut: TUNING.toastDefault });
             return;
         }
 
@@ -2453,7 +2444,7 @@ function showMemoryDatabaseModal() {
             restoreUncoveredGhosts();
             await persistMemoryDatabaseChange();
             refreshDatabaseView();
-            toastr.success(`Memory deleted from Layer ${layerIndex}.`, 'Summaryception', { timeOut: 2000 });
+            toastr.success(`Memory deleted from Layer ${layerIndex}.`, 'Summaryception', { timeOut: TUNING.toastDefault });
             return;
         }
 
@@ -2468,7 +2459,7 @@ function showMemoryDatabaseModal() {
                 return;
             }
             downloadJson(`summaryception_memory_bank_${bankKey.replace(/[^a-z0-9_-]+/gi, '_')}_${Date.now()}.json`, { format: 'summaryception-memory-bank-v3', key: bankKey, label: bank.label, store: getMemoryStoreByKey(bankKey) });
-            toastr.success('Memory bank exported.', 'Summaryception', { timeOut: 2000 });
+            toastr.success('Memory bank exported.', 'Summaryception', { timeOut: TUNING.toastDefault });
             return;
         }
 
@@ -2487,7 +2478,7 @@ function showMemoryDatabaseModal() {
             }
             await persistMemoryDatabaseChange();
             refreshDatabaseView();
-            toastr.success('Memory bank deleted.', 'Summaryception', { timeOut: 2000 });
+            toastr.success('Memory bank deleted.', 'Summaryception', { timeOut: TUNING.toastDefault });
             return;
         }
 
@@ -2512,14 +2503,14 @@ function showMemoryDatabaseModal() {
 
     overlay.querySelector('#sc_db_refresh').addEventListener('click', () => {
         refreshDatabaseView();
-        toastr.info('Memory database refreshed.', 'Summaryception', { timeOut: 1500 });
+        toastr.info('Memory database refreshed.', 'Summaryception', { timeOut: TUNING.toastShort });
     });
 
     overlay.querySelector('#sc_db_cleanup_legacy').addEventListener('click', async () => {
         snapshot = getMemoryDatabaseSnapshot();
         const legacyBanks = snapshot.banks.filter(bank => !bank.active && /^character:\d+$/.test(bank.key));
         if (!legacyBanks.length) {
-            toastr.info('No inactive legacy numeric memory banks were found.', 'Summaryception', { timeOut: 2000 });
+            toastr.info('No inactive legacy numeric memory banks were found.', 'Summaryception', { timeOut: TUNING.toastDefault });
             return;
         }
         const bankList = legacyBanks.map(bank => bank.key).join(', ');
@@ -2528,7 +2519,7 @@ function showMemoryDatabaseModal() {
         const deletedCount = legacyBanks.reduce((count, bank) => count + Number(deleteMemoryBank(bank.key)), 0);
         await persistMemoryDatabaseChange();
         refreshDatabaseView();
-        toastr.success(`Deleted ${deletedCount} legacy memory bank${deletedCount === 1 ? '' : 's'}.`, 'Summaryception', { timeOut: 3000 });
+        toastr.success(`Deleted ${deletedCount} legacy memory bank${deletedCount === 1 ? '' : 's'}.`, 'Summaryception', { timeOut: TUNING.toastMedium });
     });
 
     overlay.querySelector('#sc_db_copy').addEventListener('click', async () => {
@@ -2544,7 +2535,7 @@ function showMemoryDatabaseModal() {
                 textarea.select();
                 document.execCommand('copy');
             }
-            toastr.success('Memory database JSON copied.', 'Summaryception', { timeOut: 2000 });
+            toastr.success('Memory database JSON copied.', 'Summaryception', { timeOut: TUNING.toastDefault });
         } catch (e) {
             console.error(LOG_PREFIX, 'Could not copy memory database JSON:', e);
             toastr.error('Could not copy memory database JSON. Check console for details.', 'Summaryception');
@@ -2555,7 +2546,7 @@ function showMemoryDatabaseModal() {
         snapshot = getMemoryDatabaseSnapshot();
         overlay.querySelector('#sc_db_json').value = JSON.stringify(snapshot, null, 2);
         downloadJson(`summaryception_memory_database_${Date.now()}.json`, snapshot);
-        toastr.success('Memory database exported.', 'Summaryception', { timeOut: 2000 });
+        toastr.success('Memory database exported.', 'Summaryception', { timeOut: TUNING.toastDefault });
     });
 
     document.body.appendChild(overlay);
@@ -2621,7 +2612,7 @@ function updateSnippetBrowser() {
                         invalidateContextCache(store);
                         await saveChatStore();
                         updateInjection();
-                        toastr.success('Snippet updated', 'Summaryception', { timeOut: 1500 });
+                        toastr.success('Snippet updated', 'Summaryception', { timeOut: TUNING.toastShort });
                     }
                     updateSnippetBrowser();
                 } else if (e.key === 'Escape') {
@@ -2635,7 +2626,7 @@ function updateSnippetBrowser() {
                     invalidateContextCache(store);
                     await saveChatStore();
                     updateInjection();
-                    toastr.success('Snippet updated', 'Summaryception', { timeOut: 1500 });
+                    toastr.success('Snippet updated', 'Summaryception', { timeOut: TUNING.toastShort });
                 }
                 updateSnippetBrowser();
             });
@@ -2877,13 +2868,13 @@ function bindUIEvents() {
             toastr.info(
                 'Summarization paused. Existing summaries will continue to be injected. Use Force Summarize or unpause to catch up.',
                 'Summaryception',
-                { timeOut: 5000 }
+                { timeOut: TUNING.toastLonger }
             );
         } else {
             toastr.info(
                 'Summarization resumed. Will process new turns automatically.',
                 'Summaryception',
-                { timeOut: 3000 }
+                { timeOut: TUNING.toastMedium }
             );
         }
     });
@@ -2917,7 +2908,7 @@ function bindUIEvents() {
                 ? 'Character-card memory separation enabled for this chat. The active card now has its own memory bank.'
                 : 'Character-card memory separation disabled. This chat will use one shared memory bank.',
             'Summaryception',
-            { timeOut: 5000 }
+            { timeOut: TUNING.toastLonger }
         );
     });
 
@@ -3023,7 +3014,7 @@ function bindUIEvents() {
         const ctx = SillyTavern.getContext();
         const registered = ctx.extensionPrompts?.[MODULE_NAME];
         if (!hadSummary || !registered?.value) {
-            toastr.warning('No Summaryception summary is currently available to inject. Create or import a summary first.', 'Summaryception', { timeOut: 5000 });
+            toastr.warning('No Summaryception summary is currently available to inject. Create or import a summary first.', 'Summaryception', { timeOut: TUNING.toastLonger });
             return;
         }
         const positionLabel = INJECTION_POSITION_LABELS[getSettings().injectionPosition] || 'Prompt';
@@ -3669,7 +3660,7 @@ function showConnectionStatus(type, message) {
     if (type !== 'loading') {
         setTimeout(() => {
             if (container) container.style.display = 'none';
-        }, 8000);
+        }, TUNING.connectionStatusTimeout);
     }
 }
 
