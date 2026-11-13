@@ -45,9 +45,12 @@ export function runtime(settings = {}, includeInit = false) {
         populateProfileDropdown: () => true, getConnectionDisplayName: () => 'Test',
         fetch: async () => ({ ok: true, json: async () => [] }),
     };
-    let code = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+    // The extension is split into ES modules. Evaluate them as one script (in
+    // dependency order, imports/exports removed) so tests can reach internals.
+    const modules = ['constants', 'settings', 'prompt-toggles', 'core', 'settings-ui', 'connection-ui', 'index'];
+    let code = modules.map(name => readFileSync(new URL(`../${name}.js`, import.meta.url), 'utf8')
         .replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"];\s*/g, '')
-        ;
+        .replace(/^export\s*\{[\s\S]*?\};\s*$/m, '')).join('\n');
     code = includeInit ? code.replace('(async function init()', 'globalThis.initPromise = (async function init()') : code.split('(async function init()')[0];
     vm.createContext(globals);
     vm.runInContext(code + '\nglobalThis.api = { getSettings, getChatStore, getAllMemoryStores, getCharacterMemoryKey, getAssistantTurns, normalizeChatStore, maybeSummarizeTurns, summarizeOneBatch, runCatchup, maybePromoteLayer, beginSummarization, finishSummarization, abortSummarization, buildFullContext, assembleSummaryBlock, updateInjection, onGenerationStarted, onSourceMessageChanged, onMessageReceived, reconcileMemorySources, repairIfBranched, activateCharacterMemoryStore, validateMemoryImport, clearActiveMemory, bindUIEvents, initConnectionUI, updateUI, cleanSummarizerOutput, captureMemoryTarget, targetIsCurrent, onChatChanged, invalidateContextCache, regenerateSnippets, updateInjectionDebugOverlay, testCurrentConnectionHandler, isMemoryRunning: () => isSummarizing };', globals);
