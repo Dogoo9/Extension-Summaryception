@@ -111,6 +111,7 @@ const defaultSettings = Object.freeze({
     snippetsPerLayer: 30,
     snippetsPerPromotion: 3,
     maxLayers: 5,
+    archivePromotedSnippets: true,        // keep merged children in store.archive instead of discarding them
     promotionNameCheck: true,             // retry a promotion once when it drops names from its inputs
     protectedNames: '',                   // newline/comma list of names a promotion must keep when present
     contextBudget: 4096,
@@ -388,6 +389,7 @@ function createEmptyChatStore() {
         summarizedUpTo: -1,
         ghostedIndices: [],           // Track which messages WE ghosted
         sourceSignatures: [],
+        archive: [],                  // Snippets merged by promotion: { ...snippet, layer, parentId, archivedAt }
     };
 }
 
@@ -406,6 +408,12 @@ function snippetText(snippet) {
     return typeof snippet === 'string' ? snippet : (snippet?.text || '');
 }
 
+function newSnippetId() {
+    // crypto.randomUUID needs a secure context; SillyTavern is often served over plain LAN HTTP.
+    try { if (globalThis.crypto?.randomUUID) return crypto.randomUUID(); } catch { /* fall through */ }
+    return `sc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function normalizeChatStore(store) {
     if (!store || typeof store !== 'object') store = createEmptyChatStore();
     if (!Array.isArray(store.layers)) store.layers = [];
@@ -418,6 +426,13 @@ function normalizeChatStore(store) {
             if (typeof snippet === 'string') store.layers[i][j] = { text: snippet };
             else if (!snippet || typeof snippet.text !== 'string') store.layers[i].splice(j, 1);
         }
+        for (const snippet of store.layers[i]) if (typeof snippet.id !== 'string' || !snippet.id) snippet.id = newSnippetId();
+    }
+    if (!Array.isArray(store.archive)) store.archive = [];
+    for (let j = store.archive.length - 1; j >= 0; j--) {
+        const entry = store.archive[j];
+        if (!entry || typeof entry.text !== 'string' || !Number.isInteger(entry.layer) || entry.layer < 0) store.archive.splice(j, 1);
+        else if (typeof entry.id !== 'string' || !entry.id) entry.id = newSnippetId();
     }
     if (typeof store.summarizedUpTo !== 'number') store.summarizedUpTo = -1;
     if (!Array.isArray(store.ghostedIndices)) store.ghostedIndices = [];
@@ -970,8 +985,27 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0, target = captureMemor
  * end and trim stale snippets/ghost markers from every memory bank.
  */
 function truncateMemoryStore(store, dirty) {
+    const keep = sn => sn.turnRange && sn.turnRange[1] < dirty;
     for (let i = 0; i < store.layers.length; i++) {
-        store.layers[i] = store.layers[i].filter(sn => sn.turnRange && sn.turnRange[1] < dirty);
+        store.layers[i] = store.layers[i].filter(keep);
+    }
+    if (Array.isArray(store.archive)) {
+        store.archive = store.archive.filter(keep);
+        // A removed promoted snippet no longer represents its children. Children that
+        // still predate the change are put back into their original layer, so a late
+        // edit only rolls memory back to the last unaffected detail instead of to the
+        // start of the condensed parent.
+        const liveIds = new Set([...store.layers.flat(), ...store.archive].map(sn => sn.id));
+        const orphans = store.archive.filter(entry => entry.parentId && !liveIds.has(entry.parentId));
+        if (orphans.length) {
+            store.archive = store.archive.filter(entry => !orphans.includes(entry));
+            for (const entry of orphans) {
+                const { layer, parentId, archivedAt, ...snippet } = entry;
+                while (store.layers.length <= layer) store.layers.push([]);
+                store.layers[layer].push(snippet);
+            }
+            for (const layer of store.layers) layer.sort((a, b) => a.turnRange[0] - b.turnRange[0]);
+        }
     }
     recalculateSummarizedUpTo(store);
     store.sourceSignatures.length = Math.max(0, store.summarizedUpTo + 1);
@@ -1466,7 +1500,7 @@ async function summarizeOneBatchFromTurns(visibleTurns, run = activeRun) {
     const result = await callSummarizer(storyTxt, buildFullContext(0));
     if (!result || !runIsCurrent(run) || !transactionIsCurrent(transaction)) return false;
     if (!store.layers[0]) store.layers[0] = [];
-    store.layers[0].push({ text: result, turnRange: range, timestamp: Date.now() });
+    store.layers[0].push({ id: newSnippetId(), text: result, turnRange: range, timestamp: Date.now() });
     store.summarizedUpTo = endIdx;
     for (let i = 0; i <= endIdx; i++) store.sourceSignatures[i] = transaction.signatures[i];
     store.lastBatch = { milliseconds: Math.round(performance.now() - started), range };
@@ -1623,14 +1657,18 @@ async function maybePromoteLayer(layerIndex, run = activeRun) {
     if (!layer || layer.length <= s.snippetsPerLayer) return;
     if (!store.layers[layerIndex + 1]) store.layers[layerIndex + 1] = [];
     const destLayer = store.layers[layerIndex + 1];
-    if (!destLayer.length) {
+    // Merge only the leading run of unpinned snippets so the merged range stays
+    // contiguous. Pinned snippets (and a run of one) move up verbatim.
+    let runLength = 0;
+    while (runLength < Math.min(s.snippetsPerPromotion, layer.length) && !layer[runLength].pinned) runLength++;
+    if (!destLayer.length || runLength <= 1) {
         const seed = layer.shift();
         destLayer.push({ ...seed, promoted: true, seedFromLayer: layerIndex });
         invalidateContextCache(store);
     } else {
         // Keep original snippets in storage throughout the request. A failed or
         // canceled promotion cannot temporarily remove history or need a rollback.
-        const toMerge = layer.slice(0, s.snippetsPerPromotion);
+        const toMerge = layer.slice(0, runLength);
         const transaction = captureTransaction(run.target, store.summarizedUpTo);
         const inputs = toMerge.map(snippetText);
         const passage = inputs.join(' ');
@@ -1654,7 +1692,14 @@ async function maybePromoteLayer(layerIndex, run = activeRun) {
         }
         const ranges = toMerge.map(sn => sn.turnRange).filter(Boolean);
         layer.splice(0, toMerge.length);
-        destLayer.push({ text, fromLayer: layerIndex, mergedCount: toMerge.length, timestamp: Date.now(),
+        const id = newSnippetId();
+        if (s.archivePromotedSnippets) {
+            if (!Array.isArray(store.archive)) store.archive = [];
+            const archivedAt = Date.now();
+            for (const child of toMerge) store.archive.push({ ...child, layer: layerIndex, parentId: id, archivedAt });
+        }
+        destLayer.push({ id, text, fromLayer: layerIndex, mergedCount: toMerge.length, timestamp: Date.now(),
+            ...(s.archivePromotedSnippets ? { childIds: toMerge.map(child => child.id) } : {}),
             ...(ranges.length === toMerge.length ? { turnRange: [Math.min(...ranges.map(r => r[0])), Math.max(...ranges.map(r => r[1]))] } : {}),
             ...(check && !check.ok ? { lossy: true, missingNames: check.missing } : {}),
         });
@@ -1684,8 +1729,10 @@ function getMemoryAssemblyOptions() {
     // render accepted snippets in chronological order.
     const deepest = store.layers.findLastIndex(layer => layer?.length);
     const canonicalCount = deepest >= 0 ? store.layers[deepest].length : 0;
-    const narrative = snippets.map((sn, order) => ({ text: snippetText(sn), order }));
-    const prioritized = [...narrative.slice(0, canonicalCount), ...narrative.slice(canonicalCount).reverse()];
+    const narrative = snippets.map((sn, order) => ({ text: snippetText(sn), order, pinned: Boolean(sn.pinned) }));
+    const ordered = [...narrative.slice(0, canonicalCount), ...narrative.slice(canonicalCount).reverse()];
+    // Pinned snippets are selected first; accepted snippets still render chronologically.
+    const prioritized = [...ordered.filter(item => item.pinned), ...ordered.filter(item => !item.pinned)];
     return {
         narrative: prioritized,
         template: s.injectionTemplate || defaultSettings.injectionTemplate,
@@ -2006,6 +2053,7 @@ function updateUI() {
         $('#sc_disable_ghosting').prop('checked', s.disableGhosting);
         $('#sc_strict_verbatim_window').prop('checked', s.strictVerbatimWindow);
         $('#sc_promotion_name_check').prop('checked', s.promotionNameCheck);
+        $('#sc_archive_promoted').prop('checked', s.archivePromotedSnippets);
         $('#sc_protected_names').val(s.protectedNames || '');
         $('#sc_separate_by_character').prop('checked', s.separateMemoryByCharacterCard);
         $('#sc_verbatim_turns').val(s.verbatimTurns);
@@ -2210,6 +2258,7 @@ function getMemoryDatabaseSnapshot() {
             sourceSignatures: [...store.sourceSignatures],
             snippetCount: layers.reduce((sum, layer) => sum + layer.snippets.length, 0),
             layers,
+            archive: (store.archive || []).map(entry => ({ ...entry })),
         };
     });
 
@@ -2245,7 +2294,8 @@ function buildMemoryDatabaseHtml(snapshot) {
                             ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
                             : 'meta';
                     const timestamp = sn.timestamp ? new Date(sn.timestamp).toLocaleString() : 'unknown time';
-                    const flags = [sn.promoted ? 'promoted' : '', sn.regenerated ? 'regenerated' : '', sn.edited ? 'edited' : '',
+                    const flags = [sn.pinned ? 'pinned' : '', sn.promoted ? 'promoted' : '', sn.regenerated ? 'regenerated' : '', sn.edited ? 'edited' : '',
+                        sn.childIds?.length ? `${sn.childIds.length} archived children` : '',
                         sn.lossy ? `lossy: dropped ${(sn.missingNames || []).join(', ') || 'names'}` : '']
                         .filter(Boolean)
                         .join(', ');
@@ -2270,6 +2320,17 @@ function buildMemoryDatabaseHtml(snapshot) {
                     ${snippetsHtml}
                 </details>`;
             }).join('') || '<div class="sc-muted">No snippets in this bank yet.</div>';
+
+        const archive = bank.archive || [];
+        const archiveHtml = archive.length ? `
+                <details class="sc-db-layer sc-db-archive">
+                    <summary>Archive · ${archive.length} merged snippet${archive.length === 1 ? '' : 's'} (read-only)</summary>
+                    ${archive.map(entry => `
+                    <div class="sc-db-snippet sc-db-archived">
+                        <div class="sc-db-snippet-meta">from L${entry.layer} · ${escapeHtml(entry.turnRange ? `turns ${entry.turnRange[0]}–${entry.turnRange[1]}` : 'no range')} · parent ${escapeHtml(String(entry.parentId || '').slice(0, 8))}</div>
+                        <div class="sc-db-snippet-text">${escapeHtml(entry.text || '')}</div>
+                    </div>`).join('')}
+                </details>` : '';
 
         const attachmentRows = [
             ['Character', bank.characterName || 'Unknown character'],
@@ -2311,6 +2372,7 @@ function buildMemoryDatabaseHtml(snapshot) {
             </div>
             <div class="sc-db-attachments">${attachmentRows}</div>
             ${layerHtml}
+            ${archiveHtml}
         </details>`;
     }).join('');
 }
@@ -2598,7 +2660,7 @@ function updateSnippetBrowser() {
                     : sn.mergedCount
                         ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
                         : '';
-                const seedStr = (sn.promoted ? ' 🌱' : '')
+                const seedStr = (sn.pinned ? ' 📌' : '') + (sn.promoted ? ' 🌱' : '')
                     + (sn.lossy ? ` ⚠️ dropped: ${escapeHtml((sn.missingNames || []).join(', ') || 'names')}` : '');
                 const canRedo = Boolean(sn.turnRange);
                 const redoBtn = canRedo
@@ -2608,6 +2670,7 @@ function updateSnippetBrowser() {
                 html += `<div class="sc-snippet" data-layer="${i}" data-idx="${j}">
                 <span class="sc-snippet-text" data-layer="${i}" data-idx="${j}" title="Click to edit">${escapeHtml(sn.text)}</span>
                 <span class="sc-snippet-meta">${rangeStr}${seedStr}</span>
+                <button class="sc-snippet-pin menu_button fa-solid fa-thumbtack${sn.pinned ? ' sc-pinned' : ''}" title="${sn.pinned ? 'Unpin' : 'Pin: never merge this snippet and inject it first'}"></button>
                 ${redoBtn}
                 <button class="sc-snippet-delete menu_button fa-solid fa-xmark" title="Delete this snippet"></button>
                 </div>`;
@@ -2665,6 +2728,17 @@ function updateSnippetBrowser() {
         textarea[0].style.height = textarea[0].scrollHeight + 'px';
 
         textarea.focus().select();
+    });
+
+    $('.sc-snippet-pin').off('click').on('click', async function () {
+        const row = $(this).closest('.sc-snippet');
+        const snippet = getChatStore().layers[Number(row.data('layer'))]?.[Number(row.data('idx'))];
+        if (!snippet) return;
+        if (snippet.pinned) delete snippet.pinned; else snippet.pinned = true;
+        invalidateContextCache(getChatStore());
+        await saveChatStore();
+        updateInjection();
+        updateUI();
     });
 
     // Regeneration is available for promoted snippets that retain source ranges.
@@ -2774,6 +2848,7 @@ async function clearActiveMemory() {
     const target = captureMemoryTarget();
     const store = target.store;
     store.layers = [];
+    store.archive = [];
     store.summarizedUpTo = -1;
     store.sourceSignatures = [];
     delete store.lastBatch;
@@ -2796,6 +2871,15 @@ function validateMemoryImport(data) {
         if (snippet.turnRange && !(Array.isArray(snippet.turnRange) && snippet.turnRange.length === 2
             && snippet.turnRange.every(Number.isInteger) && snippet.turnRange[0] >= 0
             && snippet.turnRange[1] >= snippet.turnRange[0])) throw new Error('Invalid snippet source range.');
+    }
+    if (store.archive != null) {
+        if (!Array.isArray(store.archive)) throw new Error('Invalid snippet archive.');
+        for (const entry of store.archive) {
+            if (!entry || typeof entry.text !== 'string' || !Number.isInteger(entry.layer) || entry.layer < 0) throw new Error('Invalid archived snippet.');
+            if (entry.turnRange && !(Array.isArray(entry.turnRange) && entry.turnRange.length === 2
+                && entry.turnRange.every(Number.isInteger) && entry.turnRange[0] >= 0
+                && entry.turnRange[1] >= entry.turnRange[0])) throw new Error('Invalid archived snippet source range.');
+        }
     }
     if (store.summarizedUpTo != null && (!Number.isInteger(store.summarizedUpTo) || store.summarizedUpTo < -1)) {
         throw new Error('Invalid summarized cutoff.');
@@ -2908,6 +2992,11 @@ function bindUIEvents() {
                 { timeOut: TUNING.toastMedium }
             );
         }
+    });
+
+    $('#sc_archive_promoted').on('change', function () {
+        getSettings().archivePromotedSnippets = $(this).prop('checked');
+        saveSettings();
     });
 
     $('#sc_promotion_name_check').on('change', function () {

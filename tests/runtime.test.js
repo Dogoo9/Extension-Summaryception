@@ -287,6 +287,7 @@ function regenerationHistory(r) {
     store.layers = [[{ text: 'Later events.', turnRange: [4, 5] }, { text: 'Latest events.', turnRange: [6, 7] }],
         [{ text: 'Earlier events.', turnRange: [0, 3], promoted: true }]];
     store.summarizedUpTo = 7;
+    r.api.getChatStore(); // normalize (assigns stable snippet ids) before tests snapshot the layers
     return store;
 }
 
@@ -489,6 +490,7 @@ const promotionSetup = (settings = {}) => {
         { text: 'Alex rests.', turnRange: [6, 7] },
     ], [{ text: 'Seed history.', turnRange: [0, 1] }]];
     store.summarizedUpTo = 7;
+    r.api.getChatStore(); // assign stable snippet ids
     return { r, store };
 };
 const promote = async r => {
@@ -529,4 +531,71 @@ test('promotion name check can be disabled and passes clean output without a ret
     clean.r.respond(async () => 'Alex met Mara at Saltmarsh; Captain Renn trailed them to Gullhaven with the key.');
     await promote(clean.r);
     assert.equal(clean.r.requests.length, 1);
+});
+
+test('promotion archives merged children with layer, parent id and childIds', async () => {
+    const { r, store } = promotionSetup();
+    r.respond(async () => 'Alex met Mara at Saltmarsh; Captain Renn trailed them to Gullhaven with the key.');
+    const childIds = store.layers[0].slice(0, 2).map(sn => sn.id);
+    assert.ok(childIds.every(id => typeof id === 'string' && id));
+    await promote(r);
+    const merged = store.layers[1].at(-1);
+    assert.deepEqual(plain(merged.childIds), childIds);
+    assert.deepEqual(plain(store.archive.map(entry => entry.id)), childIds);
+    for (const entry of store.archive) { assert.equal(entry.layer, 0); assert.equal(entry.parentId, merged.id); }
+    assert.equal(store.layers[0].length, 1);
+});
+
+test('archivePromotedSnippets=false discards merged children as before', async () => {
+    const { r, store } = promotionSetup({ archivePromotedSnippets: false });
+    r.respond(async () => 'Alex met Mara at Saltmarsh; Captain Renn trailed them to Gullhaven with the key.');
+    await promote(r);
+    assert.equal(store.archive.length, 0);
+    assert.equal(store.layers[1].at(-1).childIds, undefined);
+});
+
+test('a source change inside a promoted range restores its unaffected archived children', async () => {
+    const { r, store } = promotionSetup();
+    r.respond(async () => 'Alex met Mara at Saltmarsh; Captain Renn trailed them to Gullhaven with the key.');
+    await promote(r);
+    store.sourceSignatures = r.ctx.chat.slice(0, 8).map(messageSignature);
+    // Edit message 4: the merged parent [2,5] and its child [4,5] are affected; child [2,3] is not.
+    r.ctx.chat[4].mes = 'Changed';
+    r.api.reconcileMemorySources();
+    assert.deepEqual(plain(store.layers.flat().map(sn => sn.turnRange).sort((a, b) => a[0] - b[0])), [[0, 1], [2, 3]]);
+    assert.equal(store.summarizedUpTo, 3);
+    assert.equal(store.archive.length, 0);
+    assert.ok(store.layers[0].some(sn => sn.text.startsWith('Alex meets Mara')));
+});
+
+test('pinned snippets are never merged and move up verbatim', async () => {
+    const { r, store } = promotionSetup();
+    store.layers[0][0].pinned = true;
+    r.respond(async () => 'Mara hands Alex the key; Renn follows them to Gullhaven; Alex rests.');
+    await promote(r);
+    const pinned = store.layers[1].find(sn => sn.pinned);
+    assert.equal(pinned.text, 'Alex meets Mara at Saltmarsh; Captain Renn watches.');
+    assert.equal(r.requests.length, 0, 'moving the pinned snippet and a run of one needs no merge');
+    assert.ok(store.layers[0].length <= 2);
+});
+
+test('pinned snippets are selected first for the injection budget', () => {
+    const r = runtime({ contextBudget: 40, contextBudgetUnit: 'characters', injectionTemplate: '{{summary}}' });
+    const store = r.api.getChatStore();
+    store.layers = [[{ text: 'Pinned fact.', turnRange: [2, 3] }, { text: 'Newest event.', turnRange: [4, 5] }],
+        [{ text: 'Deep history line.', turnRange: [0, 1] }]];
+    store.summarizedUpTo = 5;
+    // Without a pin, the budget keeps the deep layer plus the newest snippet.
+    assert.equal(r.api.assembleSummaryBlock(), 'Deep history line.\nNewest event.');
+    store.layers[0][0].pinned = true; r.api.invalidateContextCache(store);
+    assert.equal(r.api.assembleSummaryBlock(), 'Deep history line.\nPinned fact.');
+});
+
+test('imports validate and replace the archive', () => {
+    const r = runtime();
+    assert.throws(() => r.api.validateMemoryImport({ layers: [[]], archive: [{ text: 'x' }] }), /archived/);
+    assert.throws(() => r.api.validateMemoryImport({ layers: [[]], archive: 'nope' }), /archive/);
+    const imported = r.api.validateMemoryImport({ layers: [[{ text: 'A', turnRange: [0, 1] }]] });
+    assert.deepEqual(plain(imported.archive), []);
+    assert.equal(typeof imported.layers[0][0].id, 'string');
 });

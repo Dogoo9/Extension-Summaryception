@@ -476,6 +476,14 @@
                     </div>
 
                     <div class="sc-row">
+                        <label class="checkbox_label" for="sc_archive_promoted">
+                            <input type="checkbox" id="sc_archive_promoted" />
+                            <span>Archive Merged Snippets</span>
+                            <small class="sc-hint">Keep the snippets a promotion merges in a read-only archive (shown in the Memory Database) instead of discarding them. When an edit or swipe invalidates a merged snippet, its still-valid archived children are restored so less memory has to be rebuilt. Adds roughly half the size of the summaries to the chat's metadata.</small>
+                        </label>
+                    </div>
+
+                    <div class="sc-row">
                         <label class="checkbox_label" for="sc_promotion_name_check">
                             <input type="checkbox" id="sc_promotion_name_check" />
                             <span>Check Names on Promotion</span>

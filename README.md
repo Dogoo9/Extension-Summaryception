@@ -197,6 +197,7 @@ All settings are adjustable from the SillyTavern Extensions panel:
 | Snippets per Layer | 30 | Max snippets before promoting to next layer |
 | Snippets per Promotion | 3 | How many snippets merge on promotion |
 | Max Layers | 5 | Maximum recursion depth |
+| Archive Merged Snippets | On | Keep merged snippets in a read-only archive with stable ids (parent `childIds`, child `parentId`); edits that invalidate a merged snippet restore its unaffected children |
 | Check Names on Promotion | On | Before saving a merged snippet, verify names from its inputs survived; retry once listing the missing ones, else keep it and mark it lossy |
 | Protected Names | (empty) | Names (one per line or comma-separated) a promotion must keep whenever they appear in the merged snippets |
 
@@ -267,7 +268,7 @@ Fork connection settings can be saved as named profiles, updated, duplicated, an
 - **Injection Debug Overlay** — Opt-in floating view of the live registered block and its budget
 - **Regenerate Summaries** — Regenerate latest/all snippets from originals, including promoted source ranges
 - **Injection Inspector** — Verify the registered position, depth, role, and injected text
-- **Snippet Browser** — Browse, edit, and regenerate narrative snippets. Deletion rolls back dependent later memory and restores original messages for rebuilding.
+- **Snippet Browser** — Browse, edit, pin, and regenerate narrative snippets. Pinned snippets are never merged by promotion (they move up verbatim) and are selected first for the injection budget. Deletion rolls back dependent later memory and restores original messages for rebuilding.
 - **Memory Database Viewer** — Search and inspect every character bank, edit or delete snippets, export a bank, and inspect its raw JSON
 - **Export/Import** — Save and restore the active memory bank as JSON
 - **Force Summarize** — Manually trigger summarization; automatic/backlog processing preserves the verbatim window, while explicit single-batch force can summarize within it
