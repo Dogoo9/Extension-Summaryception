@@ -3,7 +3,6 @@
  * AGPL-3.0
  */
 
-
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
 const EXTENSION_VERSION = '5.5.7';

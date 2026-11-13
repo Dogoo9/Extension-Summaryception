@@ -7,10 +7,20 @@
  *
  * Module layout:
  *   constants.js       tuning constants, prompts and default settings
+ *   state.js           shared mutable runtime state (run lock, abort controller, chat epoch, ...)
  *   settings.js        settings access and logging
+ *   util.js            retry, delay and toast helpers
+ *   store.js           memory banks: storage, normalization, card identity, migration
+ *   ghosting.js        message hiding (/hide, /unhide) and source-change repair
+ *   passages.js        turn selection, passage building, summarizer context
+ *   run.js             run lifecycle, cancellation and stale-result guards
  *   prompt-toggles.js  prompt-manager toggles for default-connection requests
- *   core.js            memory store, ghosting, summarization, promotion, injection, events
- *   settings-ui.js     settings panel, snippet browser and memory database viewer
+ *   summarize.js       summarizer calls, batching, catch-up and layer promotion
+ *   injection.js       budgeted memory block and setExtensionPrompt registration
+ *   events.js          SillyTavern event handlers and slash commands
+ *   snippet-browser.js snippet browser (edit, pin, regenerate, delete)
+ *   memory-db-ui.js    memory database viewer, bank export, legacy bank cleanup
+ *   settings-ui.js     settings panel bindings, stats, injection inspector, import/export
  *   connection-ui.js   summarizer connection settings
  *   connectionutil.js, memory-budget.js, name-check.js, source-signatures.js: standalone helpers
  *
@@ -26,14 +36,20 @@ import {
 } from './settings.js';
 import {
     activateCharacterMemoryStore,
+} from './store.js';
+import {
+    repairIfBranched,
+} from './ghosting.js';
+import {
+    updateInjection,
+} from './injection.js';
+import {
     onChatChanged,
     onGenerationStarted,
     onMessageReceived,
     onSourceMessageChanged,
     registerSlashCommands,
-    repairIfBranched,
-    updateInjection,
-} from './core.js';
+} from './events.js';
 import {
     bindUIEvents,
     updateUI,

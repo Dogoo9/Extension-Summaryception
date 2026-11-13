@@ -4,11 +4,11 @@
  */
 
 import {
-    sendSummarizerRequest,
     fetchOllamaModels,
-    testOpenAIConnection,
-    populateProfileDropdown,
     getConnectionDisplayName,
+    populateProfileDropdown,
+    sendSummarizerRequest,
+    testOpenAIConnection,
 } from './connectionutil.js';
 import {
     TUNING,
