@@ -13,7 +13,7 @@ test('extension modules link as real ES modules', async () => {
     };
     globalThis.SillyTavern = { getContext: () => context };
     try {
-        for (const name of ['constants', 'settings', 'prompt-toggles', 'core', 'settings-ui', 'connection-ui', 'index']) {
+        for (const name of ['constants', 'state', 'settings', 'util', 'store', 'ghosting', 'passages', 'run', 'prompt-toggles', 'summarize', 'injection', 'events', 'snippet-browser', 'memory-db-ui', 'settings-ui', 'connection-ui', 'index']) {
             await assert.doesNotReject(import(`../${name}.js`), name);
         }
         assert.ok(context.extensionSettings.summaryception, 'index.js ran init() with linked modules');

@@ -321,6 +321,8 @@ Enable **Advanced Settings → Show Injection Debug Overlay** when debugging. Th
 
 Run `npm ci` then `npm test` (Node.js with `--test-isolation=none` support). The suite covers request cancellation, saved backlog progress, atomic regeneration, source edits and card/chat switches, preset/custom prompts, overlay escaping and updates, legacy migration, whole-snippet budgets, tokenization/settings races, and connection timeout cleanup. Model responses are mocked; this does not establish real-model summary quality or validate a live SillyTavern installation.
 
+The extension is a set of ES modules; `index.js` lists what each file holds. Shared mutable runtime state (the run lock, abort controller, chat epoch and similar) lives on the single `state` object in `state.js`, because a module cannot reassign another module's bindings. `tests/runtime-helper.js` evaluates the modules as one script in dependency order so tests can reach internals, and `tests/modules.test.js` loads the real module graph so a missing export fails the suite. When adding a module, add it to both lists.
+
 ---
 
 ## Community Forks

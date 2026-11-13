@@ -47,13 +47,13 @@ export function runtime(settings = {}, includeInit = false) {
     };
     // The extension is split into ES modules. Evaluate them as one script (in
     // dependency order, imports/exports removed) so tests can reach internals.
-    const modules = ['constants', 'settings', 'prompt-toggles', 'core', 'settings-ui', 'connection-ui', 'index'];
+    const modules = ['constants', 'state', 'settings', 'util', 'store', 'ghosting', 'passages', 'run', 'prompt-toggles', 'summarize', 'injection', 'events', 'snippet-browser', 'memory-db-ui', 'settings-ui', 'connection-ui', 'index'];
     let code = modules.map(name => readFileSync(new URL(`../${name}.js`, import.meta.url), 'utf8')
         .replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"];\s*/g, '')
         .replace(/^export\s*\{[\s\S]*?\};\s*$/m, '')).join('\n');
     code = includeInit ? code.replace('(async function init()', 'globalThis.initPromise = (async function init()') : code.split('(async function init()')[0];
     vm.createContext(globals);
-    vm.runInContext(code + '\nglobalThis.api = { getSettings, getChatStore, getAllMemoryStores, getCharacterMemoryKey, getAssistantTurns, normalizeChatStore, maybeSummarizeTurns, summarizeOneBatch, runCatchup, maybePromoteLayer, beginSummarization, finishSummarization, abortSummarization, buildFullContext, assembleSummaryBlock, updateInjection, onGenerationStarted, onSourceMessageChanged, onMessageReceived, reconcileMemorySources, repairIfBranched, activateCharacterMemoryStore, validateMemoryImport, clearActiveMemory, bindUIEvents, initConnectionUI, updateUI, cleanSummarizerOutput, captureMemoryTarget, targetIsCurrent, onChatChanged, invalidateContextCache, regenerateSnippets, updateInjectionDebugOverlay, testCurrentConnectionHandler, isMemoryRunning: () => isSummarizing };', globals);
+    vm.runInContext(code + '\nglobalThis.api = { getSettings, getChatStore, getAllMemoryStores, getCharacterMemoryKey, getAssistantTurns, normalizeChatStore, maybeSummarizeTurns, summarizeOneBatch, runCatchup, maybePromoteLayer, beginSummarization, finishSummarization, abortSummarization, buildFullContext, assembleSummaryBlock, updateInjection, onGenerationStarted, onSourceMessageChanged, onMessageReceived, reconcileMemorySources, repairIfBranched, activateCharacterMemoryStore, validateMemoryImport, clearActiveMemory, bindUIEvents, initConnectionUI, updateUI, cleanSummarizerOutput, captureMemoryTarget, targetIsCurrent, onChatChanged, invalidateContextCache, regenerateSnippets, updateInjectionDebugOverlay, testCurrentConnectionHandler, isMemoryRunning: () => state.isSummarizing };', globals);
     const api = globals.api;
     Object.assign(api.getSettings(), { separateMemoryByCharacterCard: false, verbatimTurns: 2, turnsPerSummary: 3, connectionSource: 'completion', ...settings });
     const click = async (id, event = 'click') => {
