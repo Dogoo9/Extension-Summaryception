@@ -7,14 +7,12 @@ import {
     MODULE_NAME,
 } from './constants.js';
 import {
-    state,
-} from './state.js';
-import {
     getSettings,
     log,
 } from './settings.js';
 import {
     ghostMessagesUpTo,
+    releaseStaleGhosts,
     unghostAllMessages,
 } from './ghosting.js';
 import {
@@ -103,6 +101,8 @@ function normalizeChatStore(store) {
 }
 
 function getSummarizedRangeStart(store, endIndex = store.summarizedUpTo) {
+    // A cutoff with no snippets comes from Skip Backlog: nothing was summarized, so nothing is hidden.
+    if (!store.layers.some(layer => layer?.length)) return endIndex + 1;
     const starts = store.layers.flat()
         .map(snippet => snippet?.turnRange?.[0])
         .filter(index => Number.isInteger(index) && index >= 0 && index <= endIndex);
@@ -478,16 +478,14 @@ async function activateCharacterMemoryStore() {
     const s = getSettings();
     const store = getChatStore();
     const target = captureMemoryTarget();
-    // getChatStore() selects the active bank on reads, so activeMemoryKey cannot
-    // reliably identify the bank that currently owns the message flags.
-    if (!state.displayedMemoryBank || state.displayedMemoryBank.chat !== target.chat || state.displayedMemoryBank.store !== store) {
-        await unghostAllMessages(createEmptyChatStore());
-    }
+    const end = s.enabled ? store.summarizedUpTo : -1;
+    const start = getSummarizedRangeStart(store);
+    // The message flags may belong to another bank (getChatStore() selects the
+    // active bank on reads, so activeMemoryKey cannot say which). Release only
+    // the flags this bank does not want; a reopened chat then needs no commands.
+    await releaseStaleGhosts(start, end, target);
     if (!targetIsCurrent(target)) return;
-    if (s.enabled && store.summarizedUpTo >= 0) {
-        await ghostMessagesUpTo(store.summarizedUpTo, getSummarizedRangeStart(store), target);
-    }
-    state.displayedMemoryBank = { chat: target.chat, store };
+    if (end >= 0) await ghostMessagesUpTo(end, start, target);
 }
 
 async function saveChatStore() {

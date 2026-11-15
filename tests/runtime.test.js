@@ -599,3 +599,40 @@ test('imports validate and replace the archive', () => {
     assert.deepEqual(plain(imported.archive), []);
     assert.equal(typeof imported.layers[0][0].id, 'string');
 });
+
+test('editing a skipped message keeps later memory, and a rollback keeps the skip cutoff', async () => {
+    const r = runtime({ turnsPerSummary: 1 }); r.addTurns(8);
+    const dialog = r.api.maybeSummarizeTurns();
+    r.dom.window.document.getElementById('sc_catchup_skip').click(); await dialog;
+    r.addTurns(1, 8); await r.api.maybeSummarizeTurns();
+    const store = r.api.getChatStore();
+    assert.equal(JSON.stringify(store.layers[0].map(sn => sn.turnRange)), '[[12,13]]');
+    r.ctx.chat[3].mes = 'Typo fixed.'; r.api.onSourceMessageChanged(3); await wait(10);
+    assert.equal(store.layers[0].length, 1); assert.equal(store.summarizedUpTo, 13);
+    r.ctx.chat[13].mes = 'Rewritten.'; r.api.onSourceMessageChanged(13); await wait(10);
+    assert.equal(store.layers[0].length, 0); assert.equal(store.summarizedUpTo, 11);
+    assert.equal(r.ctx.chat.some(m => m.extra?.sc_ghosted), false);
+});
+
+test('reopening a chat leaves matching visibility untouched and never hides a skipped backlog', async () => {
+    const r = runtime(); r.addTurns(11);
+    await r.api.runCatchup(r.api.getAssistantTurns(r.ctx.chat), 9);
+    assert.equal(r.ctx.chat.filter(m => m.extra?.sc_ghosted).length, 18);
+    let before = r.hides.length;
+    await r.api.activateCharacterMemoryStore();
+    assert.equal(r.hides.length, before);
+    // A stray flag past the cutoff and a ghost someone unhid are both corrected.
+    r.ctx.chat[20].extra = { sc_ghosted: true }; r.ctx.chat[20].is_system = true;
+    r.ctx.chat[4].is_system = false; delete r.ctx.chat[4].is_hidden; r.api.getChatStore().ghostedIndices = [];
+    before = r.hides.length;
+    await r.api.activateCharacterMemoryStore();
+    assert.equal(r.hides.slice(before).sort().join(), '/hide 4,/unhide 20');
+    assert.equal(r.ctx.chat[20].extra.sc_ghosted, undefined);
+    assert.equal(r.api.getChatStore().ghostedIndices.join(), [...Array(18).keys()].join());
+
+    const skipped = runtime({ turnsPerSummary: 1 }); skipped.addTurns(8);
+    const dialog = skipped.api.maybeSummarizeTurns();
+    skipped.dom.window.document.getElementById('sc_catchup_skip').click(); await dialog;
+    await skipped.api.activateCharacterMemoryStore();
+    assert.equal(skipped.ctx.chat.some(m => m.is_system), false);
+});

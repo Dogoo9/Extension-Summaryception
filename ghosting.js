@@ -106,6 +106,32 @@ async function unghostAllMessages(storeOverride = null) {
     }
 }
 
+/**
+ * Clear Summaryception's flag from messages outside [startIndex, endIndex], and
+ * from messages inside it whose visibility does not match the hiding setting
+ * (ghostMessagesUpTo then re-marks those). Matching messages are left untouched.
+ */
+async function releaseStaleGhosts(startIndex, endIndex, target = captureMemoryTarget()) {
+    const { chat, store } = target;
+    const hide = !getSettings().disableGhosting;
+    for (let i = 0; i < chat.length; i++) {
+        const msg = chat[i];
+        if (!msg?.extra?.sc_ghosted) continue;
+        const hidden = Boolean(msg.is_system);
+        if (i >= startIndex && i <= endIndex && hidden === hide) continue;
+        if (!targetIsCurrent(target)) return;
+        delete msg.extra.sc_ghosted;
+        if (!hidden) continue;
+        try {
+            await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${i}`, { showOutput: false });
+        } catch (e) {
+            log(`Failed to unhide message ${i}:`, e);
+        }
+    }
+    if (!targetIsCurrent(target)) return;
+    store.ghostedIndices = chat.flatMap((msg, i) => msg?.extra?.sc_ghosted ? [i] : []);
+}
+
 async function ghostMessagesUpTo(endIndex, startIndex = 0, target = captureMemoryTarget()) {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
@@ -162,7 +188,17 @@ async function ghostMessagesUpTo(endIndex, startIndex = 0, target = captureMemor
  * Detect chat branches that copied Summaryception metadata past the new chat's
  * end and trim stale snippets/ghost markers from every memory bank.
  */
+// First message any snippet was built from. Messages before it were skipped
+// (Skip Backlog), not summarized. Snippets without a range have unknown sources.
+function firstSourceIndex(store) {
+    const snippets = store.layers.flat();
+    if (!snippets.length) return store.summarizedUpTo + 1;
+    const starts = snippets.map(sn => sn.turnRange?.[0]);
+    return starts.every(Number.isInteger) ? Math.min(...starts) : 0;
+}
+
 function truncateMemoryStore(store, dirty) {
+    const skippedThrough = firstSourceIndex(store) - 1;
     const keep = sn => sn.turnRange && sn.turnRange[1] < dirty;
     for (let i = 0; i < store.layers.length; i++) {
         store.layers[i] = store.layers[i].filter(keep);
@@ -186,6 +222,8 @@ function truncateMemoryStore(store, dirty) {
         }
     }
     recalculateSummarizedUpTo(store);
+    // Rolling back summaries must not bring a skipped backlog back.
+    store.summarizedUpTo = Math.max(store.summarizedUpTo, Math.min(skippedThrough, dirty - 1));
     store.sourceSignatures.length = Math.max(0, store.summarizedUpTo + 1);
     store.ghostedIndices = store.ghostedIndices.filter(i => i <= store.summarizedUpTo);
     invalidateContextCache(store);
@@ -216,7 +254,7 @@ function reconcileMemorySources(changedHint = null) {
         if (store.summarizedUpTo >= chat.length || futureRanges.length) {
             dirty = dirty < 0 ? chat.length : Math.min(dirty, chat.length);
         }
-        if (Number.isInteger(changedHint) && changedHint >= 0
+        if (Number.isInteger(changedHint) && changedHint >= firstSourceIndex(store)
             && store.summarizedUpTo >= changedHint) {
             dirty = dirty < 0 ? changedHint : Math.min(dirty, changedHint);
         }
@@ -243,6 +281,7 @@ async function repairIfBranched() {
 export {
     ghostMessagesUpTo,
     reconcileMemorySources,
+    releaseStaleGhosts,
     repairIfBranched,
     restoreUncoveredGhosts,
     truncateMemoryStore,
