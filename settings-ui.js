@@ -31,6 +31,7 @@ import {
     getChatStore,
     getSummarizedRangeStart,
     invalidateContextCache,
+    newSnippetId,
     persistMemoryDatabaseChange,
     validateMemoryImport,
 } from './store.js';
@@ -236,7 +237,7 @@ function bindCustomPromptUI() {
         const existing = s.savedCustomPrompts.find(prompt => prompt.name === name);
         if (existing && !confirm(`Replace saved prompt "${name}"?`)) return;
         if (existing) existing.text = s.summarizerUserPrompt;
-        else s.savedCustomPrompts.push({ id: crypto.randomUUID(), name, text: s.summarizerUserPrompt });
+        else s.savedCustomPrompts.push({ id: newSnippetId(), name, text: s.summarizerUserPrompt });
         saveSettings();
         renderCustomPromptSlots();
         toastr.success('Custom prompt saved.', 'Summaryception');
@@ -557,6 +558,11 @@ function bindUIEvents() {
         const value = SillyTavern.getContext().extensionPrompts?.[MODULE_NAME]?.value || '';
         if (!value) {
             toastr.warning('No Summaryception injection is currently registered.', 'Summaryception');
+            return;
+        }
+        // navigator.clipboard is undefined when SillyTavern is served over plain LAN HTTP.
+        if (!navigator.clipboard?.writeText) {
+            toastr.warning('Clipboard access needs HTTPS or localhost. Copy from the preview box, or use /sc-injected.', 'Summaryception');
             return;
         }
         await navigator.clipboard.writeText(value);

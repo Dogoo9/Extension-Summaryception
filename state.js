@@ -21,9 +21,6 @@ const state = {
     // Injection
     registeredInjectionReport: null,     // last block registered with setExtensionPrompt
     injectionMeasurementSequence: 0,     // latest async token measurement wins
-
-    // UI
-    displayedMemoryBank: null,      // bank key last shown in the stats panel
 };
 
 export {

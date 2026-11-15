@@ -208,7 +208,9 @@ async function summarizeOneBatchFromTurns(visibleTurns, run = state.activeRun) {
     if (!store.layers[0]) store.layers[0] = [];
     store.layers[0].push({ id: newSnippetId(), text: result, turnRange: range, timestamp: Date.now() });
     store.summarizedUpTo = endIdx;
-    for (let i = 0; i <= endIdx; i++) store.sourceSignatures[i] = transaction.signatures[i];
+    // Sign only this batch's sources: earlier batches signed theirs, and skipped
+    // messages are not sources, so editing one must not roll memory back.
+    for (let i = passageStart; i <= endIdx; i++) store.sourceSignatures[i] = transaction.signatures[i];
     store.lastBatch = { milliseconds: Math.round(performance.now() - started), range };
     invalidateContextCache(store);
     await saveChatStore();
