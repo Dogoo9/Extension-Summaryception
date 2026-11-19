@@ -25,18 +25,38 @@ export function wrapMemory(template, summary) {
     return text.includes('{{summary}}') ? text.replaceAll('{{summary}}', () => summary) : `${text}\n${summary}`.trim();
 }
 
+// Pinned items, then newest items up to half the budget, then the deepest layer
+// oldest-first, then any remaining newest items. Returned in chronological order.
+export function selectWithRecencyReserve(items, budget, measure) {
+    const chronological = order => [...order].sort((a, b) => a.order - b.order);
+    const selected = new Set();
+    const tryAdd = (item, limit) => {
+        if (selected.has(item)) return true;
+        selected.add(item);
+        if (measure(chronological(selected)) <= limit) return true;
+        selected.delete(item);
+        return false;
+    };
+    for (const item of items) if (item.pinned) tryAdd(item, budget);
+    const unpinned = chronological(items.filter(item => !item.pinned));
+    const newest = [...unpinned].reverse();
+    // The newest item may use the whole budget, so it is never crowded out by the reserve limit.
+    if (newest.length) tryAdd(newest[0], budget);
+    for (const item of newest.slice(1)) if (!tryAdd(item, budget / 2)) break;
+    for (const item of unpinned) if (item.canonical) tryAdd(item, budget);
+    for (const item of newest) tryAdd(item, budget);
+    return chronological(selected);
+}
+
 export function assembleBudgetedMemory({ narrative, template, meter }) {
-    const selected = [];
-    const body = () => [...selected].sort((a, b) => a.order - b.order).map(item => item.text).join('\n');
-    const fits = () => meter.count(wrapMemory(template, body())) <= meter.budget;
-    for (let i = 0; i < narrative.length; i++) {
-        const item = typeof narrative[i] === 'string' ? { text: narrative[i], order: i } : narrative[i];
-        if (!String(item.text).trim()) continue;
-        selected.push({ ...item, text: String(item.text).trim() });
-        if (!fits()) selected.pop();
-    }
+    const items = narrative
+        .map((entry, i) => (typeof entry === 'string' ? { text: entry, order: i } : entry))
+        .filter(item => String(item.text).trim())
+        .map(item => ({ ...item, text: String(item.text).trim() }));
+    const body = list => list.map(item => item.text).join('\n');
+    const selected = selectWithRecencyReserve(items, meter.budget, list => meter.count(wrapMemory(template, body(list))));
     return {
-        text: body() && fits() ? wrapMemory(template, body()) : '',
+        text: selected.length ? wrapMemory(template, body(selected)) : '',
         omittedSnippets: narrative.length - selected.length,
         meterLabel: meter.label,
     };
@@ -70,4 +90,22 @@ export async function assembleBudgetedMemoryAsync(options, countTokens) {
         const fallback = assembleBudgetedMemory(options);
         return { ...fallback, meterLabel: `${options.meter.label}; tokenizer unavailable` };
     }
+}
+
+/**
+ * How many of the oldest unsummarized replies must go to fit the verbatim token
+ * limit. The newest `keep` replies always stay. Tokens are estimated at 4 characters.
+ */
+export function turnsOverTokenBudget({ chat, turns, from, budget, keep = 2 }) {
+    if (!(budget > 0)) return 0;
+    const tokens = message => (message?.is_system && !message.extra?.sc_ghosted) ? 0 : Math.ceil(String(message?.mes || '').length / 4);
+    let total = 0;
+    for (let i = from; i < chat.length; i++) total += tokens(chat[i]);
+    let cursor = from;
+    let count = 0;
+    while (total > budget && count < turns.length - keep) {
+        for (; cursor <= turns[count].index; cursor++) total -= tokens(chat[cursor]);
+        count++;
+    }
+    return count;
 }

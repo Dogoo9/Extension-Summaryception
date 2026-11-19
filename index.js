@@ -18,7 +18,6 @@
  *   summarize.js       summarizer calls, batching, catch-up and layer promotion
  *   injection.js       budgeted memory block and setExtensionPrompt registration
  *   events.js          SillyTavern event handlers and slash commands
- *   snippet-browser.js snippet browser (edit, pin, regenerate, delete)
  *   memory-db-ui.js    memory database viewer, bank export, legacy bank cleanup
  *   settings-ui.js     settings panel bindings, stats, injection inspector, import/export
  *   connection-ui.js   summarizer connection settings

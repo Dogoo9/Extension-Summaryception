@@ -6,8 +6,9 @@
 import {
     INJECTION_POSITION_LABELS,
     MODULE_NAME,
-    PREVIOUS_NARRATIVE_PROMPT,
     PROMPT_PRESETS,
+    SUMMARIZER_SYSTEM_PROMPT,
+    SUPERSEDED_SYSTEM_PROMPT,
     TUNING,
     defaultSettings,
 } from './constants.js';
@@ -62,9 +63,6 @@ import {
     updateInjectionDebugOverlay,
 } from './injection.js';
 import {
-    updateSnippetBrowser,
-} from './snippet-browser.js';
-import {
     confirmAndCleanupLegacyMemoryBanks,
     getMemoryBankAttachment,
     getMemoryBankLabel,
@@ -91,6 +89,8 @@ function updateUI() {
         $('#sc_separate_by_character').prop('checked', s.separateMemoryByCharacterCard);
         $('#sc_verbatim_turns').val(s.verbatimTurns);
         $('#sc_verbatim_turns_val').text(s.verbatimTurns);
+        $('#sc_verbatim_token_budget').val(s.verbatimTokenBudget);
+        $('#sc_verbatim_token_budget_val').text(s.verbatimTokenBudget);
         $('#sc_turns_per_summary').val(s.turnsPerSummary);
         $('#sc_turns_per_summary_val').text(s.turnsPerSummary);
         $('#sc_snippets_per_layer').val(s.snippetsPerLayer);
@@ -107,27 +107,28 @@ function updateUI() {
         $('#sc_injection_depth_val').text(getInjectionDepthValue(s));
         $('#sc_injection_role').val(s.injectionRole || defaultSettings.injectionRole);
         $('#sc_injection_scan').prop('checked', Boolean(s.injectionScan));
+        if (s.summarizerSystemPrompt === SUPERSEDED_SYSTEM_PROMPT) {
+            s.summarizerSystemPrompt = SUMMARIZER_SYSTEM_PROMPT;
+            saveSettings();
+        }
         $('#sc_summarizer_system_prompt').val(s.summarizerSystemPrompt);
+        $('#sc_summarizer_promotion_prompt').val(s.summarizerPromotionPrompt);
         // ── Prompt preset migration & sync ──
         // Upgrade only exact prior built-ins. Never replace user-authored text.
+        const currentPrompt = (s.summarizerUserPrompt || '').trim();
+        const upgradedPrompt = upgradeBuiltInPrompt(currentPrompt);
         if (!s.promptPreset) {
-            const currentPrompt = (s.summarizerUserPrompt || '').trim();
-            const gameStatePrompt = PROMPT_PRESETS.gamestate.trim();
-            const previousNarrativePrompt = PREVIOUS_NARRATIVE_PROMPT.trim();
-
-            if (!currentPrompt || currentPrompt === gameStatePrompt || currentPrompt === previousNarrativePrompt) {
+            if (!currentPrompt || upgradedPrompt === PROMPT_PRESETS.narrative || upgradedPrompt === PROMPT_PRESETS.gamestate) {
                 s.promptPreset = 'narrative';
                 s.summarizerUserPrompt = PROMPT_PRESETS.narrative;
-                saveSettings();
             } else {
                 // User customized their prompt — mark as custom
                 s.promptPreset = 'custom';
-                saveSettings();
             }
-        } else if (s.promptPreset === 'narrative'
-            && (s.summarizerUserPrompt || '').trim() === PREVIOUS_NARRATIVE_PROMPT.trim()) {
+            saveSettings();
+        } else if (s.promptPreset !== 'custom' && upgradedPrompt && upgradedPrompt !== s.summarizerUserPrompt) {
             // The preset field already existed when this built-in prompt changed.
-            s.summarizerUserPrompt = PROMPT_PRESETS.narrative;
+            s.summarizerUserPrompt = upgradedPrompt;
             saveSettings();
         }
 
@@ -179,7 +180,6 @@ function updateUI() {
         updateInjectionInspector(preview);
 
         updateProcessingUI();
-        updateSnippetBrowser();
         renderCustomPromptSlots();
     } catch (e) {
         log('updateUI error:', e);
@@ -395,6 +395,7 @@ function bindUIEvents() {
 
     const sliders = [
         { id: '#sc_verbatim_turns', key: 'verbatimTurns', display: '#sc_verbatim_turns_val' },
+        { id: '#sc_verbatim_token_budget', key: 'verbatimTokenBudget', display: '#sc_verbatim_token_budget_val' },
         { id: '#sc_turns_per_summary', key: 'turnsPerSummary', display: '#sc_turns_per_summary_val' },
         { id: '#sc_snippets_per_layer', key: 'snippetsPerLayer', display: '#sc_snippets_per_layer_val' },
         { id: '#sc_snippets_per_promotion', key: 'snippetsPerPromotion', display: '#sc_snippets_per_promotion_val' },
@@ -414,6 +415,7 @@ function bindUIEvents() {
     const textareas = [
         { id: '#sc_injection_template', key: 'injectionTemplate' },
         { id: '#sc_summarizer_system_prompt', key: 'summarizerSystemPrompt' },
+        { id: '#sc_summarizer_promotion_prompt', key: 'summarizerPromotionPrompt' },
     ];
 
     for (const ta of textareas) {

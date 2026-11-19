@@ -116,76 +116,6 @@
 
 /* ─── Snippet Browser ─────────────────────────────────────────── */
 
-.sc-snippet-browser {
-    max-height: 300px;
-    overflow-y: auto;
-    border: 1px solid var(--SmartThemeBorderColor, #444);
-    border-radius: 6px;
-    padding: 6px;
-    background: var(--SmartThemeBlurTintColor, #1a1a2e);
-}
-
-.sc-browser-layer {
-    margin-bottom: 10px;
-}
-
-.sc-browser-layer:last-child {
-    margin-bottom: 0;
-}
-
-.sc-browser-layer-title {
-    font-weight: bold;
-    font-size: 0.85em;
-    opacity: 0.7;
-    margin-bottom: 4px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.sc-snippet {
-    display: flex;
-    align-items: flex-start;
-    gap: 6px;
-    padding: 4px 6px;
-    border-radius: 4px;
-    margin-bottom: 3px;
-    background: rgba(255, 255, 255, 0.04);
-    font-size: 0.82em;
-    line-height: 1.35;
-}
-
-.sc-snippet:hover {
-    background: rgba(255, 255, 255, 0.08);
-}
-
-.sc-snippet-text {
-    flex: 1;
-    word-break: break-word;
-}
-
-.sc-snippet-meta {
-    opacity: 0.4;
-    font-size: 0.85em;
-    white-space: nowrap;
-    flex-shrink: 0;
-}
-
-.sc-snippet-delete {
-    flex-shrink: 0;
-    opacity: 0.3;
-    cursor: pointer;
-    font-size: 0.8em;
-    padding: 2px 4px;
-    border: none;
-    background: none;
-    color: #ff6b6b;
-    transition: opacity 0.15s;
-}
-
-.sc-snippet-delete:hover {
-    opacity: 1;
-}
-
 /* ─── Catch-Up Dialog ─────────────────────────────────────────── */
 
 .sc-catchup-overlay {
@@ -276,48 +206,6 @@
 
 /* ─── Snippet Editing ─────────────────────────────────────────── */
 
-.sc-snippet-text {
-    flex: 1;
-    word-break: break-word;
-    cursor: pointer;
-}
-
-.sc-snippet-text:hover {
-    text-decoration: underline dotted;
-    text-decoration-color: rgba(255, 255, 255, 0.3);
-}
-
-.sc-snippet-edit {
-    flex: 1;
-    min-height: 2em;
-    max-height: 300px;
-    padding: 4px 6px;
-    font-size: 0.82em;
-    line-height: 1.35;
-    font-family: monospace;
-    resize: vertical;
-    overflow-y: auto;
-    background: var(--SmartThemeBlurTintColor, #1a1a2e);
-    color: var(--SmartThemeBodyColor, #ccc);
-    border: 1px solid var(--SmartThemeQuoteColor, #43b581);
-    border-radius: 4px;
-    outline: none;
-}
-
-.sc-snippet-redo {
-    color: var(--SmartThemeQuoteColor, #8fc8ff);
-    cursor: pointer;
-    opacity: 0.6;
-    transition: opacity 0.15s;
-    font-size: 0.85em;
-    background: none;
-    border: none;
-    padding: 2px 4px;
-}
-
-.sc-snippet-redo:hover {
-    opacity: 1;
-}
 /* ═══════════════════════════════════════════════════════════
  *  Summaryception — Connection Settings Styles
  *  ═══════════════════════════════════════════════════════════ */
@@ -687,22 +575,6 @@
 #sc_backlog_bar { width: 100%; margin-block: 8px; }
 #sc_regenerate_scope { width: auto; max-width: 100%; }
 .sc-toast-cancel-backlog { margin-top: 8px; }
-
-.sc-snippet-pin {
-    flex-shrink: 0;
-    cursor: pointer;
-    opacity: 0.3;
-    font-size: 0.8em;
-    background: none;
-    border: none;
-    padding: 2px 4px;
-    transition: opacity 0.15s;
-}
-
-.sc-snippet-pin:hover,
-.sc-snippet-pin.sc-pinned {
-    opacity: 1;
-}
 
 .sc-db-archived {
     opacity: 0.75;

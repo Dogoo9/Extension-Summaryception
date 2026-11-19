@@ -71,7 +71,8 @@ const PREVIOUS_NARRATIVE_PROMPT = `<player_name>{{player_name}}</player_name>
     Skip any passages that are empty, unclear, or lack significant content.
     Write in short phrases, no more than 20; output must be a single line:`;
 
-const NARRATIVE_PROMPT = `<player_name>{{player_name}}</player_name>
+// Built-ins replaced by the append-only prompts; kept only to upgrade exact matches.
+const SUPERSEDED_NARRATIVE_PROMPT = `<player_name>{{player_name}}</player_name>
     <prior_context>{{context_str}}</prior_context>
     <passage_in_question>{{story_txt}}</passage_in_question>
 
@@ -81,16 +82,41 @@ const NARRATIVE_PROMPT = `<player_name>{{player_name}}</player_name>
 
     When prior_context is empty, permit a larger initial summary so establishing identities, relationships, location, time, and unresolved goals are retained. Otherwise, write no more than 20 short phrases. Skip passages that are empty, unclear, or lack significant content. Keep the output compact and on a single line:`;
 
+const SUPERSEDED_SYSTEM_PROMPT = 'Role: precise narrative-state tracker. Output only the summary line — no preamble, no commentary, no markdown.';
+const SUPERSEDED_FOCUSED_ENDING = 'Output only a compact summary on one line, no headings or commentary, at most 20 short phrases.';
+const SUPERSEDED_GAMESTATE_ENDING = 'Write in short phrases, no more than 20; output must be a single line:';
+
+const SUMMARIZER_SYSTEM_PROMPT = 'You keep a running story memory for a roleplay. Each response is appended after the earlier memory entries and never replaces them. Output only bullet points that start with "- ", with no preamble, headings, or commentary. Put one fact or story beat in each bullet. Use only information supported by the supplied text. Do not invent details, guess motives, or continue the story.';
+
+const NARRATIVE_PROMPT = `<player_name>{{player_name}}</player_name>
+<prior_context>{{context_str}}</prior_context>
+<passage_in_question>{{story_txt}}</passage_in_question>
+
+Write memory bullets for what passage_in_question adds to prior_context. Include only what is new; do not repeat or rewrite prior_context. Second-person prose in the passage refers to {{player_name}}; use the player's name.
+
+Preserve exact names, places, items, numbers, and time references. Record events, decisions, promises, relationship changes, changes of state, new knowledge, open threads, and details that make this moment distinctive. Attribute each action and statement to the right character.
+
+If prior_context is empty, also establish who is present, where they are, and what is unresolved. If the passage adds almost nothing, write one bullet with its most useful new fact.`;
+
+const PROMOTION_PROMPT = `<player_name>{{player_name}}</player_name>
+<prior_context>{{context_str}}</prior_context>
+<memories_to_merge>{{story_txt}}</memories_to_merge>
+
+Merge memories_to_merge, which are older story memories, into one denser set of bullets in chronological order. Aim for about a quarter of their combined length.
+
+Keep every durable fact, name, place, item, number, promise, decision, relationship change, and open thread. Remove only true repetition and wording that adds no information. If a later memory resolves or changes something, keep the outcome and state it clearly. Use prior_context only to understand references; do not copy it. Do not add anything absent from memories_to_merge or describe these events as the current scene.`;
+
 const defaultSettings = Object.freeze({
     enabled: true,
     verbatimTurns: 10,
-    turnsPerSummary: 3,
+    verbatimTokenBudget: 6000,            // estimated tokens of unsummarized chat; 0 disables the limit
+    turnsPerSummary: 6,
     // false = hysteresis: the verbatim window floats between verbatimTurns and
     // verbatimTurns + turnsPerSummary - 1, so each summarizer call covers a full
     // batch and the prompt prefix changes once per batch instead of every turn.
     strictVerbatimWindow: false,
     snippetsPerLayer: 30,
-    snippetsPerPromotion: 3,
+    snippetsPerPromotion: 5,
     maxLayers: 5,
     archivePromotedSnippets: true,        // keep merged children in store.archive instead of discarding them
     promotionNameCheck: true,             // retry a promotion once when it drops names from its inputs
@@ -104,10 +130,10 @@ const defaultSettings = Object.freeze({
     injectionRole: 'system',              // 'system' | 'user' | 'assistant'
     injectionScan: false,                 // Include summary block in World Info scans
 
-    summarizerSystemPrompt:
-        'Role: precise narrative-state tracker. Output only the summary line — no preamble, no commentary, no markdown.',
+    summarizerSystemPrompt: SUMMARIZER_SYSTEM_PROMPT,
 
     summarizerUserPrompt: NARRATIVE_PROMPT,
+    summarizerPromotionPrompt: PROMOTION_PROMPT,  // used only when merging snippets into a deeper layer
 
     promptPreset: 'narrative',
     pauseSummarization: false,  // true = stop processing, keep injecting
@@ -129,7 +155,7 @@ const defaultSettings = Object.freeze({
 
     // ─── Connection Settings ─────────────────────────────────────
     connectionSource: 'default',          // 'default' | 'profile' | 'ollama' | 'openai' | 'koboldcpp' | 'completion' | 'custom'
-    summarizerResponseLength: 0,          // 0 = use preset default; set lower if you get "max_tokens > 4096 must have stream=true" errors
+    summarizerResponseLength: 1024,       // output limit for every source; 0 = source default
     savedConnectionProfiles: [],
     activeSavedConnectionProfileId: '',
     summarizerTemperature: 0.3,
@@ -142,7 +168,7 @@ const defaultSettings = Object.freeze({
     openaiUrl: '',
     openaiKey: '',
     openaiModel: '',
-    openaiMaxTokens: 0,                   // 0 = no limit (provider default)
+    openaiMaxTokens: 0,                   // fallback when summarizerResponseLength is 0; 0 = provider default
 
     // KoboldCPP direct connection (fork addition)
     koboldcppUrl:    'http://localhost:5001',
@@ -192,7 +218,7 @@ Focus on: story progression, plot points, plans, tasks, quests; location changes
 
 Exclude anything insubstantial, fluff, atmospheric details, or events already covered in Prior Context.
 Skip any passages that are empty, unclear, or lack significant content.
-Write in short phrases, no more than 20; output must be a single line:`,
+Output only bullets, one fact or change in each.`,
 
     custom: null, // Uses whatever is in the textarea
 };
@@ -206,7 +232,17 @@ function focusedSummaryPrompt(focus) {
 
 Pause the roleplay and summarize only new information in passage_in_question needed to coherently continue prior_context. Second-person prose refers to {{player_name}}; use the player's name.
 ${focus}
-Use only supported events from the supplied passage. Do not continue the roleplay, invent motives, or repeat information already in prior_context. If prior_context is empty, establish relevant identities and setting. Output only a compact summary on one line, no headings or commentary, at most 20 short phrases.`;
+Use only supported events from the supplied passage. Do not continue the roleplay, invent motives, or repeat information already in prior_context. If prior_context is empty, establish relevant identities and setting. Output only bullets, one fact or beat in each, with no headings or commentary.`;
+}
+
+// Returns the current text of a built-in prompt, or null for anything user-written.
+function upgradeBuiltInPrompt(text) {
+    const current = String(text || '').trim();
+    if (current === PREVIOUS_NARRATIVE_PROMPT.trim() || current === SUPERSEDED_NARRATIVE_PROMPT.trim()) return NARRATIVE_PROMPT;
+    const candidate = current
+        .replace(SUPERSEDED_FOCUSED_ENDING, 'Output only bullets, one fact or beat in each, with no headings or commentary.')
+        .replace(SUPERSEDED_GAMESTATE_ENDING, 'Output only bullets, one fact or change in each.');
+    return Object.values(PROMPT_PRESETS).find(preset => preset?.trim() === candidate) ?? null;
 }
 
 const EXTENSION_PROMPT_TYPES = Object.freeze({
@@ -234,9 +270,13 @@ export {
     INJECTION_POSITION_LABELS,
     LOG_PREFIX,
     MODULE_NAME,
-    PREVIOUS_NARRATIVE_PROMPT,
+    NARRATIVE_PROMPT,
+    PROMOTION_PROMPT,
     PROMPT_PRESETS,
     RETRY_CONFIG,
+    SUMMARIZER_SYSTEM_PROMPT,
+    SUPERSEDED_SYSTEM_PROMPT,
     TUNING,
     defaultSettings,
+    upgradeBuiltInPrompt,
 };

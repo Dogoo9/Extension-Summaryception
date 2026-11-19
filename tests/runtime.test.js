@@ -348,11 +348,16 @@ test('regeneration retains originals on invalid sources, model errors, edits and
     }
 });
 
-test('promoted snippets expose regeneration through the snippet browser', async () => {
-    const r = runtime(); const store = regenerationHistory(r); r.api.updateUI();
-    const button = r.dom.window.document.querySelector('.sc-snippet[data-layer="1"] .sc-snippet-redo');
-    assert.ok(button);
-    await r.$._data(button, 'events').click[0].handler.call(button);
+test('the memory database pins and regenerates snippets', async () => {
+    const r = runtime(); const store = regenerationHistory(r); r.api.showMemoryDatabaseModal();
+    const doc = r.dom.window.document;
+    const settle = async done => { for (let i = 0; i < 200 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 5)); };
+    doc.querySelector('.sc-db-snippet[data-layer="1"] .sc-db-snippet-pin-btn').click();
+    await settle(() => store.layers[1][0].pinned);
+    assert.equal(store.layers[1][0].pinned, true);
+    await settle(() => doc.querySelector('.sc-db-snippet[data-layer="1"] .sc-db-snippet-pin-btn')?.textContent.includes('Unpin'));
+    doc.querySelector('.sc-db-snippet[data-layer="1"] .sc-db-snippet-redo-btn').click();
+    await settle(() => store.layers[1][0].regenerated);
     assert.equal(store.layers[1][0].regenerated, true);
 });
 
@@ -588,7 +593,7 @@ test('pinned snippets are selected first for the injection budget', () => {
     // Without a pin, the budget keeps the deep layer plus the newest snippet.
     assert.equal(r.api.assembleSummaryBlock(), 'Deep history line.\nNewest event.');
     store.layers[0][0].pinned = true; r.api.invalidateContextCache(store);
-    assert.equal(r.api.assembleSummaryBlock(), 'Deep history line.\nPinned fact.');
+    assert.equal(r.api.assembleSummaryBlock(), 'Pinned fact.\nNewest event.');
 });
 
 test('imports validate and replace the archive', () => {
@@ -635,4 +640,29 @@ test('reopening a chat leaves matching visibility untouched and never hides a sk
     skipped.dom.window.document.getElementById('sc_catchup_skip').click(); await dialog;
     await skipped.api.activateCharacterMemoryStore();
     assert.equal(skipped.ctx.chat.some(m => m.is_system), false);
+});
+
+test('layer merges use the promotion prompt while new batches use the summary prompt', async () => {
+    const { r } = promotionSetup();
+    Object.assign(r.api.getSettings(), { summarizerUserPrompt: 'BATCH {{story_txt}}', summarizerPromotionPrompt: 'MERGE {{story_txt}}' });
+    await promote(r);
+    assert.ok(r.requests.length > 0); assert.ok(r.requests.every(request => request[2].startsWith('MERGE ')));
+});
+
+test('summarizer context keeps the newest snippet when old history fills its budget', () => {
+    const r = runtime({ contextBudget: 100, contextBudgetUnit: 'characters' });
+    r.api.getChatStore().layers = [Array.from({ length: 8 }, (_, i) => ({ text: `S${i} ${'x'.repeat(30)}` }))];
+    assert.match(r.api.buildFullContext(0), /S7 /);
+});
+
+test('exact old built-in prompts upgrade and custom text is left alone', () => {
+    const r = runtime(); const s = r.api.getSettings();
+    r.api.bindUIEvents(); r.$('#sc_prompt_preset').val('concise').trigger('change');
+    const concise = s.summarizerUserPrompt;
+    s.summarizerUserPrompt = concise.replace('Output only bullets, one fact or beat in each, with no headings or commentary.', 'Output only a compact summary on one line, no headings or commentary, at most 20 short phrases.');
+    r.api.updateUI(); assert.equal(s.summarizerUserPrompt, concise);
+    s.summarizerSystemPrompt = 'Role: precise narrative-state tracker. Output only the summary line — no preamble, no commentary, no markdown.';
+    s.promptPreset = 'custom'; s.summarizerUserPrompt = 'Mine {{story_txt}}';
+    r.api.updateUI();
+    assert.match(s.summarizerSystemPrompt, /appended/); assert.equal(s.summarizerUserPrompt, 'Mine {{story_txt}}');
 });

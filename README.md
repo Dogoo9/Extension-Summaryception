@@ -149,7 +149,7 @@ This is the core innovation. The summarizer prompt receives:
 | `{{context_str}}` | **Budgeted existing summaries** — everything already recorded |
 | `{{story_txt}}` | The new passage to summarize |
 
-The instruction: *"Summarize only necessary elements to coherently continue the Prior Context. Exclude anything already covered."*
+The instruction: *write bullets only for what the passage adds to the prior context, preserving names, facts, decisions and open threads.*
 
 Possible behavior (model-dependent):
 - **Snippet 1** has to establish characters, setting, relationships (~80–100 tokens)
@@ -192,10 +192,10 @@ All settings are adjustable from the SillyTavern Extensions panel:
 | Setting | Default | Description |
 |---|---|---|
 | Verbatim Turns | 10 | Recent assistant turns kept word-for-word |
-| Turns per Batch | 3 | Oldest turns summarized together per trigger |
+| Turns per Batch | 6 | Oldest turns summarized together per trigger |
 | Strict Verbatim Window | Off | Off: summarize only once a full batch is past the verbatim limit (window floats between Verbatim and Verbatim + Batch − 1), giving one call per batch and fewer prompt-prefix changes for backend caches. On: summarize every turn past the limit immediately |
 | Snippets per Layer | 30 | Max snippets before promoting to next layer |
-| Snippets per Promotion | 3 | How many snippets merge on promotion |
+| Snippets per Promotion | 5 | How many snippets merge on promotion |
 | Max Layers | 5 | Maximum recursion depth |
 | Archive Merged Snippets | On | Keep merged snippets in a read-only archive with stable ids (parent `childIds`, child `parentId`); edits that invalidate a merged snippet restore its unaffected children |
 | Check Names on Promotion | On | Before saving a merged snippet, verify names from its inputs survived; retry once listing the missing ones, else keep it and mark it lossy |
@@ -219,6 +219,7 @@ Select a preset from the dropdown in Summary Prompts, or edit the prompt directl
 Plus fully customizable:
 - 📝 Summarizer system prompt
 - 📝 Summarizer user prompt (with `{{player_name}}`, `{{context_str}}`, `{{story_txt}}` variables)
+- 📝 Layer merge prompt, used only for promotions (same variables)
 - 📝 Injection wrapper template
 - 📍 Injection position, in-chat depth, role, and World Info scanning
 
@@ -268,8 +269,8 @@ Fork connection settings can be saved as named profiles, updated, duplicated, an
 - **Injection Debug Overlay** — Opt-in floating view of the live registered block and its budget
 - **Regenerate Summaries** — Regenerate latest/all snippets from originals, including promoted source ranges
 - **Injection Inspector** — Verify the registered position, depth, role, and injected text
-- **Snippet Browser** — Browse, edit, pin, and regenerate narrative snippets. Pinned snippets are never merged by promotion (they move up verbatim) and are selected first for the injection budget. Deletion rolls back dependent later memory and restores original messages for rebuilding.
-- **Memory Database Viewer** — Search and inspect every character bank, edit or delete snippets, export a bank, and inspect its raw JSON
+- **Memory Database Viewer** — Search every character bank, edit, pin or regenerate snippets, roll memory back from a snippet, export a bank, and inspect its raw JSON. Pinned snippets skip layer merges and are selected first for the injection budget
+- **Verbatim Token Limit** — Summarizes earlier when recent messages exceed an estimated token limit, always keeping the newest two replies
 - **Export/Import** — Save and restore the active memory bank as JSON
 - **Force Summarize** — Manually trigger summarization; automatic/backlog processing preserves the verbatim window, while explicit single-batch force can summarize within it
 - **Stop / Cancel Backlog** — Abort the active run; completed backlog batches stay saved

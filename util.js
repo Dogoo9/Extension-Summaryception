@@ -10,10 +10,6 @@ import {
     log,
 } from './settings.js';
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 function parseRetryAfter(error) {
     try {
         const retryAfter = error?.response?.headers?.get?.('retry-after')

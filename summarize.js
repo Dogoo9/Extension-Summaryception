@@ -7,6 +7,9 @@ import {
     sendSummarizerRequest,
 } from './connectionutil.js';
 import {
+    turnsOverTokenBudget,
+} from './memory-budget.js';
+import {
     checkNameRetention,
     parseNameList,
 } from './name-check.js';
@@ -14,6 +17,7 @@ import {
     LOG_PREFIX,
     RETRY_CONFIG,
     TUNING,
+    defaultSettings,
 } from './constants.js';
 import {
     state,
@@ -71,10 +75,13 @@ import {
     updateUI,
 } from './settings-ui.js';
 
-async function callSummarizer(storyTxt, contextStr, extraInstructions = '') {
+async function callSummarizer(storyTxt, contextStr, { extraInstructions = '', promotion = false } = {}) {
     const s = structuredClone(getSettings());
     const variables = { player_name: getPlayerName(), context_str: contextStr || '(none yet)', story_txt: storyTxt };
-    const prompt = s.summarizerUserPrompt.replace(/{{(player_name|context_str|story_txt)}}/g, (_, key) => variables[key])
+    const template = promotion
+        ? (s.summarizerPromotionPrompt?.trim() ? s.summarizerPromotionPrompt : defaultSettings.summarizerPromotionPrompt)
+        : s.summarizerUserPrompt;
+    const prompt = template.replace(/{{(player_name|context_str|story_txt)}}/g, (_, key) => variables[key])
         + (extraInstructions ? `\n\n${extraInstructions}` : '');
     const systemPrompt = s.summarizerSystemPrompt;
     const defaultMode = !s.connectionSource || s.connectionSource === 'default';
@@ -149,9 +156,13 @@ async function maybeSummarizeTurns() {
     const target = captureMemoryTarget();
     if (s.debugMode && s.traceMode) debugVisibleTurns(target.chat, target.store);
     const visible = unsummarizedTurns(target.chat, target.store);
-    const overflow = visible.length - s.verbatimTurns;
+    const countOverflow = visible.length - s.verbatimTurns;
+    const tokenOverflow = turnsOverTokenBudget({
+        chat: target.chat, turns: visible, from: target.store.summarizedUpTo + 1, budget: Number(s.verbatimTokenBudget),
+    });
+    const overflow = Math.max(countOverflow, tokenOverflow);
     if (overflow <= 0) return;
-    if (overflow > s.turnsPerSummary * TUNING.backlogMultiplier && !state.catchupDismissed) {
+    if (countOverflow > s.turnsPerSummary * TUNING.backlogMultiplier && !state.catchupDismissed) {
         const run = beginSummarization();
         if (!run) return;
         let choice;
@@ -169,6 +180,10 @@ async function maybeSummarizeTurns() {
         if (choice !== 'partial') return;
         state.catchupDismissed = true;
         return summarizeOneBatch(visible.slice(0, overflow));
+    }
+    // Over the token limit: take a full batch when possible so the limit is not hit again next turn.
+    if (tokenOverflow > 0) {
+        return summarizeOneBatch(visible.slice(0, Math.max(tokenOverflow, Math.min(s.turnsPerSummary, visible.length - 2))));
     }
     // Hysteresis: wait for a full batch. Summarizing one turn per reply costs a
     // summarizer call per turn and changes the prompt prefix (memory block and
@@ -375,10 +390,9 @@ async function maybePromoteLayer(layerIndex, run = state.activeRun) {
         const toMerge = layer.slice(0, runLength);
         const transaction = captureTransaction(run.target, store.summarizedUpTo);
         const inputs = toMerge.map(snippetText);
-        const passage = inputs.join(' ');
+        const passage = inputs.join('\n');
         const context = buildFullContext(layerIndex + 1);
-        const instructions = 'This is historical memory promotion. Preserve identities, durable facts and unresolved threads. Keep events chronological. Do not describe this older passage as the current scene.';
-        let text = await callSummarizer(passage, context, instructions);
+        let text = await callSummarizer(passage, context, { promotion: true });
         if (!text || !runIsCurrent(run) || !transactionIsCurrent(transaction)) return;
         // Deterministic quality gate: deep layers tend to squeeze names out.
         const checkOptions = { protectedNames: parseNameList(s.protectedNames) };
@@ -386,8 +400,10 @@ async function maybePromoteLayer(layerIndex, run = state.activeRun) {
         if (check && !check.ok) {
             log(`Promotion from L${layerIndex} dropped names: ${check.missing.join(', ')}. Retrying once.`);
             const names = check.missing.slice(0, 30).join(', ');
-            const retry = await callSummarizer(passage, context,
-                `${instructions} The merged memories name the following, and your output must keep every one of them: ${names}.`);
+            const retry = await callSummarizer(passage, context, {
+                promotion: true,
+                extraInstructions: `The merged memories name the following, and your output must keep every one of them: ${names}.`,
+            });
             if (!runIsCurrent(run) || !transactionIsCurrent(transaction)) return;
             if (retry) {
                 const retryCheck = checkNameRetention(inputs, retry, checkOptions);

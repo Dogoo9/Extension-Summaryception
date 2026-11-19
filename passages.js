@@ -4,6 +4,9 @@
  */
 
 import {
+    selectWithRecencyReserve,
+} from './memory-budget.js';
+import {
     defaultSettings,
 } from './constants.js';
 import {
@@ -58,17 +61,6 @@ function getAssistantTurns(chat) {
         const isOurGhost = m.extra?.sc_ghosted === true;
         const isAssistant = !m.is_user && (!m.is_system || isOurGhost);
         if (isAssistant && m.mes && m.mes.trim().length > 0) {
-            turns.push({ index: i, mes: m.mes, name: m.name || 'Assistant' });
-        }
-    }
-    return turns;
-}
-
-function getVisibleAssistantTurns(chat) {
-    const turns = [];
-    for (let i = 0; i < chat.length; i++) {
-        const m = chat[i];
-        if (!m.is_user && !m.is_system && !m.extra?.sc_ghosted && m.mes && m.mes.trim().length > 0) {
             turns.push({ index: i, mes: m.mes, name: m.name || 'Assistant' });
         }
     }
@@ -141,23 +133,16 @@ function buildFullContext(downToLayer = 0) {
         if (store.layers[i]?.length) { deepest = i; break; }
     }
 
-    // The deepest layer is canonical history. Fill remaining space with the newest
-    // lower-layer (not-yet-promoted) snippets, but emit each group chronologically.
+    // Same recency guarantee as the injected memory block.
     const candidates = [];
-    if (deepest >= 0) {
-        for (const sn of store.layers[deepest]) candidates.push({ text: snippetText(sn) });
-        for (let i = deepest - 1; i >= downToLayer; i--) {
-            const layer = store.layers[i] || [];
-            for (let j = layer.length - 1; j >= 0; j--) {
-                candidates.push({ text: snippetText(layer[j]), recent: true, layer: i, order: j });
-            }
+    for (let i = deepest; i >= downToLayer; i--) {
+        for (const sn of store.layers[i] || []) {
+            const text = snippetText(sn).trim();
+            if (text) candidates.push({ text, order: candidates.length, canonical: i === deepest });
         }
     }
-    const selected = fitContextParts(candidates, budget);
-    const canonical = selected.filter(part => !part.recent);
-    const recent = selected.filter(part => part.recent)
-        .sort((a, b) => b.layer - a.layer || a.order - b.order);
-    const result = [...canonical, ...recent].map(part => part.text).join(' ') || '(none yet)';
+    const measure = list => list.reduce((sum, item) => sum + item.text.length + 1, -1);
+    const result = selectWithRecencyReserve(candidates, budget, measure).map(part => part.text).join('\n') || '(none yet)';
     const bankCache = cached || new Map();
     bankCache.set(cacheKey, result);
     assembledContextCache.set(store, bankCache);

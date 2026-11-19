@@ -36,6 +36,9 @@ import {
     captureMemoryTarget,
     targetIsCurrent,
 } from './run.js';
+import {
+    regenerateSnippets,
+} from './summarize.js';
 
 function getMemoryBankLabel(key) {
     const { chatMetadata } = SillyTavern.getContext();
@@ -166,8 +169,14 @@ function buildMemoryDatabaseHtml(snapshot) {
                             <button class="menu_button sc-db-snippet-edit-btn" type="button" title="Edit this memory snippet">
                                 <i class="fa-solid fa-pen-to-square"></i> Edit Memory
                             </button>
-                            <button class="menu_button menu_button_danger sc-db-snippet-delete-btn" type="button" title="Delete this memory snippet">
-                                <i class="fa-solid fa-trash"></i> Delete
+                            <button class="menu_button sc-db-snippet-pin-btn" type="button" title="Pinned memories skip layer merges and are chosen first for the memory budget">
+                                <i class="fa-solid fa-thumbtack"></i> ${sn.pinned ? 'Unpin' : 'Pin'}
+                            </button>
+                            ${bank.active && sn.turnRange ? `<button class="menu_button sc-db-snippet-redo-btn" type="button" title="Rewrite this memory from its original messages">
+                                <i class="fa-solid fa-rotate-right"></i> Regenerate
+                            </button>` : ''}
+                            <button class="menu_button menu_button_danger sc-db-snippet-delete-btn" type="button" title="Remove this memory and every newer one, and show their messages again">
+                                <i class="fa-solid fa-clock-rotate-left"></i> Roll Back From Here
                             </button>
                         </div>
                     </div>`;
@@ -369,6 +378,25 @@ function showMemoryDatabaseModal() {
             return;
         }
 
+        const pinButton = event.target.closest('.sc-db-snippet-pin-btn');
+        const redoButton = event.target.closest('.sc-db-snippet-redo-btn');
+        if (pinButton || redoButton) {
+            const snippetEl = (pinButton || redoButton).closest('.sc-db-snippet');
+            const bankKey = snippetEl?.dataset.bankKey;
+            const { store, snippet } = getMemorySnippetByPath(bankKey, Number.parseInt(snippetEl?.dataset.layer, 10), Number.parseInt(snippetEl?.dataset.idx, 10));
+            if (!snippet) {
+                toastr.error('Could not find that memory snippet. Refreshing database view.', 'Summaryception');
+            } else if (redoButton) {
+                await regenerateSnippets([snippet]);
+            } else {
+                if (snippet.pinned) delete snippet.pinned; else snippet.pinned = true;
+                invalidateContextCache(store);
+                await persistMemoryDatabaseChange();
+            }
+            refreshDatabaseView();
+            return;
+        }
+
         const deleteButton = event.target.closest('.sc-db-snippet-delete-btn');
         if (deleteButton) {
             const snippetEl = deleteButton.closest('.sc-db-snippet');
@@ -377,7 +405,7 @@ function showMemoryDatabaseModal() {
             const snippetIndex = Number.parseInt(snippetEl?.dataset.idx, 10);
 
             if (!bankKey || Number.isNaN(layerIndex) || Number.isNaN(snippetIndex)) return;
-            if (!confirm(`Delete memory snippet #${snippetIndex + 1} from Layer ${layerIndex}? This cannot be undone.`)) return;
+            if (!confirm(`Roll back from memory #${snippetIndex + 1} in Layer ${layerIndex}? This memory and every newer one are removed, and their messages become visible again. A memory with no message range clears the whole bank. This cannot be undone.`)) return;
 
             const { store, layer, snippet } = getMemorySnippetByPath(bankKey, layerIndex, snippetIndex);
             if (!store || !Array.isArray(layer) || !snippet) {
@@ -391,7 +419,7 @@ function showMemoryDatabaseModal() {
             restoreUncoveredGhosts();
             await persistMemoryDatabaseChange();
             refreshDatabaseView();
-            toastr.success(`Memory deleted from Layer ${layerIndex}.`, 'Summaryception', { timeOut: TUNING.toastDefault });
+            toastr.success(`Memory rolled back from Layer ${layerIndex}.`, 'Summaryception', { timeOut: TUNING.toastDefault });
             return;
         }
 

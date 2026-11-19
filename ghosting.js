@@ -32,13 +32,6 @@ import {
     targetIsCurrent,
 } from './run.js';
 
-async function repairGhostingForRange(startIdx, endIdx) {
-    const store = getChatStore();
-    const before = store.ghostedIndices.length;
-    await ghostMessagesUpTo(endIdx, startIdx);
-    return store.ghostedIndices.length - before;
-}
-
 async function unghostAllMessages(storeOverride = null) {
     const { chat } = SillyTavern.getContext();
     const store = storeOverride ? normalizeChatStore(storeOverride) : getChatStore();

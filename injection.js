@@ -51,16 +51,12 @@ function getMemoryAssemblyOptions() {
     const store = getChatStore();
     const snippets = [];
     for (let i = store.layers.length - 1; i >= 0; i--) snippets.push(...(store.layers[i] || []));
-    // Prioritize canonical deepest history, then newest unpromoted events;
-    // render accepted snippets in chronological order.
     const deepest = store.layers.findLastIndex(layer => layer?.length);
     const canonicalCount = deepest >= 0 ? store.layers[deepest].length : 0;
-    const narrative = snippets.map((sn, order) => ({ text: snippetText(sn), order, pinned: Boolean(sn.pinned) }));
-    const ordered = [...narrative.slice(0, canonicalCount), ...narrative.slice(canonicalCount).reverse()];
-    // Pinned snippets are selected first; accepted snippets still render chronologically.
-    const prioritized = [...ordered.filter(item => item.pinned), ...ordered.filter(item => !item.pinned)];
     return {
-        narrative: prioritized,
+        narrative: snippets.map((sn, order) => ({
+            text: snippetText(sn), order, pinned: Boolean(sn.pinned), canonical: order < canonicalCount,
+        })),
         template: s.injectionTemplate || defaultSettings.injectionTemplate,
         meter: getMemoryMeter(),
     };

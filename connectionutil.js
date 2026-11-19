@@ -113,7 +113,7 @@ async function routeSummarizerRequest(settings, systemPrompt, userPrompt) {
         case 'ollama':
             return await sendViaOllama(settings.ollamaUrl, settings.ollamaModel, systemPrompt, userPrompt, settings);
         case 'openai':
-            return await sendViaOpenAI(settings.openaiUrl, settings.openaiKey, settings.openaiModel, systemPrompt, userPrompt, settings.openaiMaxTokens, settings);
+            return await sendViaOpenAI(settings.openaiUrl, settings.openaiKey, settings.openaiModel, systemPrompt, userPrompt, settings.summarizerResponseLength || settings.openaiMaxTokens, settings);
         case 'koboldcpp':
             return await sendViaKoboldCPP(settings.koboldcppUrl, settings.koboldcppPrefix, settings.koboldcppSuffix, systemPrompt, userPrompt, settings);
         case 'completion':
@@ -516,8 +516,7 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
         headers['Authorization'] = `Bearer ${apiKey}`;
     }
 
-    // Use maxTokens from settings, default to 0 (no limit / provider default)
-    const tokenLimit = maxTokens && maxTokens > 0 ? maxTokens : undefined;
+        const tokenLimit = maxTokens && maxTokens > 0 ? maxTokens : undefined;
 
     const requestBody = {
         model: model,
@@ -753,7 +752,7 @@ async function sendViaCompletion(settings, systemPrompt, userPrompt) {
     const body = {
         prompt,
         temperature: Number(settings.summarizerTemperature ?? 0.3),
-        max_tokens: settings.openaiMaxTokens || settings.summarizerResponseLength || 512,
+        max_tokens: settings.summarizerResponseLength || settings.openaiMaxTokens || 512,
     };
     if (settings.completionModel) body.model = settings.completionModel;
     if (settings.summarizerStopSequences?.length) body.stop = settings.summarizerStopSequences;
@@ -804,7 +803,7 @@ async function sendViaCustomHttp(settings, systemPrompt, userPrompt) {
         model: settings.customModel || settings.openaiModel || settings.completionModel || '',
         apiKey: settings.customApiKey || settings.openaiKey || settings.completionKey || '',
         temperature: Number(settings.summarizerTemperature ?? 0.3),
-        maxTokens: settings.openaiMaxTokens || settings.summarizerResponseLength || 512,
+        maxTokens: settings.summarizerResponseLength || settings.openaiMaxTokens || 512,
     };
     let headers;
     let body;
