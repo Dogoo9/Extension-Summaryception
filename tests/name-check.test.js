@@ -35,3 +35,21 @@ test('protected names must survive; heuristic names allow a quarter to drop', ()
     // A protected name absent from the inputs is not required.
     assert.equal(checkNameRetention(['Alex waits.'], 'Alex waits.', { protectedNames: ['Mara'] }).ok, true);
 });
+
+test('batch summaries retry once when a protected name is dropped, and never without a list', async () => {
+    const { runtime } = await import('./runtime-helper.js');
+    const r = runtime({ protectedNames: 'Mara', promotionNameCheck: true }); r.addTurns(5);
+    r.ctx.chat[1].mes = 'Mara draws her knife.';
+    const replies = ['- Someone met Alex.', '- Mara met Alex.'];
+    r.respond(() => replies.shift());
+    await r.api.maybeSummarizeTurns();
+    assert.equal(r.requests.length, 2);
+    assert.match(r.requests[1][2], /must mention every one of them: Mara/);
+    assert.equal(r.api.getChatStore().layers[0][0].text, '- Mara met Alex.');
+
+    const plain = runtime({ protectedNames: '' }); plain.addTurns(5);
+    plain.ctx.chat[1].mes = 'Mara draws her knife.';
+    plain.respond(() => '- Someone met Alex.');
+    await plain.api.maybeSummarizeTurns();
+    assert.equal(plain.requests.length, 1);
+});

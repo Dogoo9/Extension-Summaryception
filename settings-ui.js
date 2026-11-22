@@ -139,6 +139,8 @@ function updateUI() {
         $('#sc_injection_debug_overlay_enabled').prop('checked', s.injectionDebugOverlay);
         $('#sc_strip_patterns').val((s.stripPatterns || []).join('\n'));
         $('#sc_summarizer_response_length').val(s.summarizerResponseLength || 0);
+        $('#sc_injection_depth_row').toggle(s.injectionPosition === 'in_chat');
+        showTab(s.activeTab);
 
         let ghostedCount = 0;
         try {
@@ -184,6 +186,18 @@ function updateUI() {
     } catch (e) {
         log('updateUI error:', e);
     }
+}
+
+function showTab(name) {
+    const tabs = $('.sc-settings .sc-tab');
+    const known = tabs.toArray().some(tab => tab.dataset.tab === name);
+    const active = known ? name : defaultSettings.activeTab;
+    tabs.each((_, tab) => {
+        const on = tab.dataset.tab === active;
+        tab.classList.toggle('active', on);
+        tab.setAttribute('aria-selected', String(on));
+    });
+    $('.sc-settings .sc-tab-panel').each((_, panel) => { panel.hidden = panel.dataset.tab !== active; });
 }
 
 function estimateTokens(text) {
@@ -294,7 +308,7 @@ function bindUIEvents() {
         if (s.pauseSummarization) {
             abortSummarization();
             toastr.info(
-                'Summarization paused. Existing summaries will continue to be injected. Use Force Summarize or unpause to catch up.',
+                'Summarization paused. Existing summaries will continue to be injected. Use Summarize Now or unpause to catch up.',
                 'Summaryception',
                 { timeOut: TUNING.toastLonger }
             );
@@ -505,6 +519,12 @@ function bindUIEvents() {
         toastr.success('Summaryception-owned visibility repaired. Manually hidden messages preserved.', 'Summaryception');
     });
 
+    $('.sc-settings .sc-tab').on('click', function () {
+        getSettings().activeTab = this.dataset.tab;
+        saveSettings();
+        showTab(this.dataset.tab);
+    });
+
     $('#sc_view_database').on('click', function () {
         showMemoryDatabaseModal();
     });
@@ -535,7 +555,7 @@ function bindUIEvents() {
             else if (turns.length) await summarizeOneBatch(turns); // Explicit force may use the verbatim window.
             else toastr.info('Nothing to summarize.', 'Summaryception');
         } finally {
-            $(this).prop('disabled', false).html('<i class="fa-solid fa-bolt"></i> Force Summarize Now');
+            $(this).prop('disabled', false).html('<i class="fa-solid fa-bolt"></i> Summarize Now');
             updateInjection();
             updateUI();
         }

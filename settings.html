@@ -6,130 +6,173 @@
         </div>
         <div class="inline-drawer-content">
 
-            <!-- ═══ Enable ═══ -->
-            <div class="sc-row">
-                <label class="checkbox_label" for="sc_enabled">
-                    <input type="checkbox" id="sc_enabled" />
-                    <span>Enable Summaryception</span>
-                </label>
-            </div>
-
-            <!-- ═══ Pause ═══ -->
-            <div class="sc-row">
-                <label class="checkbox_label" for="sc_pause_summarization">
-                    <input type="checkbox" id="sc_pause_summarization" />
-                    <span>Pause Summarization</span>
-                    <small class="sc-hint">Stop processing new turns while keeping existing summaries injected. Preserves prompt cache hits. Unpause or use Force Summarize to catch up.</small>
-                </label>
-            </div>
-
-            <!-- ═══ Character Memory Scope ═══ -->
-            <div class="sc-row">
-                <label class="checkbox_label" for="sc_separate_by_character">
-                    <input type="checkbox" id="sc_separate_by_character" />
-                    <span>Separate memory per character card</span>
-                    <small class="sc-hint">Within each chat, keep a separate Summaryception memory bank for the active character card. Useful when swapping cards or reusing chat exports; note that message hiding is still per chat.</small>
-                </label>
-            </div>
-
-            <div class="sc-row">
-                <label class="checkbox_label" for="sc_disable_ghosting">
-                    <input type="checkbox" id="sc_disable_ghosting" />
-                    <span>Disable Message Hiding</span>
-                    <small class="sc-hint">Continue summarizing and tracking covered messages without visually hiding them. Useful for compatibility with other memory extensions.</small>
-                </label>
-            </div>
-
-            <!-- ═══ Actions ═══ -->
-            <div class="sc-button-row">
-                <button id="sc_force_summarize" class="menu_button">
-                    <i class="fa-solid fa-bolt"></i> Force Summarize Now
-                </button>
-                <button id="sc_stop_summarize" class="menu_button menu_button_danger">
-                    <i class="fa-solid fa-stop"></i> Stop
-                </button>
-                <select id="sc_regenerate_scope" class="text_pole" aria-label="Summaries to regenerate">
-                    <option value="latest">Latest summary</option>
-                    <option value="all">All summaries</option>
-                </select>
-                <button id="sc_regenerate_latest" class="menu_button" type="button">
-                    <i class="fa-solid fa-rotate-right"></i> Regenerate Summaries
-                </button>
-                <button id="sc_repair" class="menu_button">
-                    <i class="fa-solid fa-wrench"></i> Repair Orphans
-                </button>
-                <button id="sc_view_database" class="menu_button">
-                    <i class="fa-solid fa-database"></i> View Memory Database
-                </button>
-                <button id="sc_cleanup_legacy_banks" class="menu_button menu_button_danger">
-                    <i class="fa-solid fa-broom"></i> Clean Up Legacy Banks
-                </button>
-            </div>
-
-            <div id="sc_backlog_progress" class="sc-stats-box" style="display: none;">
-                <div id="sc_backlog_status" role="status" aria-live="polite"></div>
-                <progress id="sc_backlog_bar" max="1" value="0" aria-label="Backlog progress"></progress>
-                <button id="sc_cancel_backlog" class="menu_button menu_button_danger" type="button">Cancel Backlog</button>
-            </div>
-            <p class="sc-hint">Regeneration uses the current prompt and original messages. Stop cancels the run and keeps original summaries. Completed backlog batches stay saved; use Force Summarize to resume.</p>
-
-            <hr class="sc-divider" />
-
-            <!-- ═══ Preview ═══ -->
-            <h4 class="sc-section-title">👁️ Injection Preview</h4>
-            <textarea id="sc_preview" class="text_pole sc-textarea sc-preview" rows="6" readonly></textarea>
-            <div class="sc-button-row">
-                <button id="sc_refresh_preview" class="menu_button">
-                    <i class="fa-solid fa-rotate"></i> Refresh
-                </button>
-                <button id="sc_copy_injected" class="menu_button">
-                    <i class="fa-solid fa-copy"></i> Copy Registered Injection
-                </button>
-            </div>
-            <div id="sc_injection_inspector" class="sc-stats-box"></div>
-
-            <div class="sc-button-row">
-                <button id="sc_import" class="menu_button">
-                   <i class="fa-solid fa-download"></i> Import Memory
-                </button>
-                <button id="sc_export" class="menu_button">
-                    <i class="fa-solid fa-upload"></i> Export Memory
-                </button>
-                <button id="sc_clear_memory" class="menu_button menu_button_danger">
-                    <i class="fa-solid fa-trash"></i> Clear Memory
-                </button>
-            </div>
-
-            <hr class="sc-divider" />
-
-            <!-- ═══ Layer Stats ═══ -->
-            <h4 class="sc-section-title">📊 Layer Stats</h4>
-            <div id="sc_layer_stats" class="sc-stats-box"></div>
-
-            <hr class="sc-divider" />
-
-            <!-- ═══ Advanced Settings ═══ -->
-            <div class="inline-drawer">
-                <div class="inline-drawer-toggle inline-drawer-header">
-                    <b>⚙️ Advanced Settings</b>
-                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+            <!-- ═══ Status and everyday controls ═══ -->
+            <div class="sc-card">
+                <div class="sc-toggle-row">
+                    <label class="checkbox_label" for="sc_enabled">
+                        <input type="checkbox" id="sc_enabled" />
+                        <span>Enabled</span>
+                    </label>
+                    <label class="checkbox_label" for="sc_pause_summarization" title="Keep injecting existing memory but stop summarizing new turns.">
+                        <input type="checkbox" id="sc_pause_summarization" />
+                        <span>Paused</span>
+                    </label>
                 </div>
-                <div class="inline-drawer-content">
 
-                    <!-- ═══════════════════════════════════════════════════════════════════
-                         Summarizer Connection Settings
-                         Insert this inside the Advanced Settings inline-drawer-content
-                         ═══════════════════════════════════════════════════════════════════ -->
-                    <div id="summaryception_connection_settings" class="summaryception-connection-section">
-                        <hr class="sysHR">
-                        <div class="summaryception-section-header">
-                            <span class="fa-solid fa-bolt"></span>
-                            <span>Summarizer Connection</span>
+                <div id="sc_layer_stats" class="sc-stats-box" role="status"></div>
+
+                <div id="sc_backlog_progress" class="sc-stats-box" style="display: none;">
+                    <div id="sc_backlog_status" role="status" aria-live="polite"></div>
+                    <progress id="sc_backlog_bar" max="1" value="0" aria-label="Backlog progress"></progress>
+                    <button id="sc_cancel_backlog" class="menu_button menu_button_danger" type="button">Cancel Backlog</button>
+                </div>
+
+                <div class="sc-button-row sc-primary-actions">
+                    <button id="sc_force_summarize" class="menu_button" type="button" title="Summarize everything older than the verbatim window now.">
+                        <i class="fa-solid fa-bolt"></i> Summarize Now
+                    </button>
+                    <button id="sc_stop_summarize" class="menu_button menu_button_danger" type="button" title="Cancel the running request. Saved batches are kept.">
+                        <i class="fa-solid fa-stop"></i> Stop
+                    </button>
+                    <button id="sc_view_database" class="menu_button" type="button" title="Browse, edit, pin, regenerate and roll back stored summaries.">
+                        <i class="fa-solid fa-database"></i> Memory Database
+                    </button>
+                    <button id="sc_clear_memory" class="menu_button menu_button_danger" type="button" title="Delete this chat's Summaryception memory for the active card and unhide its messages. Asks first.">
+                        <i class="fa-solid fa-trash"></i> Clear Memory
+                    </button>
+                </div>
+            </div>
+
+            <!-- ═══ Sections ═══ -->
+            <div class="sc-tabs" role="tablist" aria-label="Summaryception settings">
+                <button type="button" class="menu_button sc-tab" role="tab" data-tab="timing"><i class="fa-solid fa-clock"></i> Timing</button>
+                <button type="button" class="menu_button sc-tab" role="tab" data-tab="memory"><i class="fa-solid fa-layer-group"></i> Memory</button>
+                <button type="button" class="menu_button sc-tab" role="tab" data-tab="connection"><i class="fa-solid fa-plug"></i> Connection</button>
+                <button type="button" class="menu_button sc-tab" role="tab" data-tab="prompts"><i class="fa-solid fa-pen-to-square"></i> Prompts</button>
+                <button type="button" class="menu_button sc-tab" role="tab" data-tab="injection"><i class="fa-solid fa-thumbtack"></i> Injection</button>
+                <button type="button" class="menu_button sc-tab" role="tab" data-tab="tools"><i class="fa-solid fa-toolbox"></i> Tools</button>
+            </div>
+
+            <!-- ═══ When to summarize ═══ -->
+            <div class="sc-tab-panel" data-tab="timing" role="tabpanel">
+                    <div class="sc-row">
+                        <label for="sc_verbatim_turns">
+                            <span>Replies kept word for word</span>
+                            <small class="sc-hint">Recent assistant replies sent as-is. Older ones get summarized.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_verbatim_turns" min="1" max="50" step="1" />
+                            <span id="sc_verbatim_turns_val" class="sc-val">10</span>
                         </div>
-                        <small class="summaryception-help-text">
-                            Choose which LLM connection to use for summarization. Use a cheaper/faster model
-                            to save costs while keeping your main API for RP.
-                        </small>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_turns_per_summary">
+                            <span>Replies per summary</span>
+                            <small class="sc-hint">How many old replies are summarized together in one call.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_turns_per_summary" min="1" max="20" step="1" />
+                            <span id="sc_turns_per_summary_val" class="sc-val">3</span>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_verbatim_token_budget">
+                            <span>Word-for-word token limit</span>
+                            <small class="sc-hint">Summarize sooner when recent messages pass this estimate. The newest two replies always stay. 0 turns it off.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_verbatim_token_budget" min="0" max="30000" step="500" />
+                            <span id="sc_verbatim_token_budget_val" class="sc-val">6000</span>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_strict_verbatim_window">
+                            <input type="checkbox" id="sc_strict_verbatim_window" />
+                            <span>Summarize every reply immediately</span>
+                        </label>
+                        <small class="sc-hint">Off (recommended) waits for a full batch: fewer calls, and the prompt cache survives longer.</small>
+                    </div>
+            </div>
+
+            <!-- ═══ Memory size and layers ═══ -->
+            <div class="sc-tab-panel" data-tab="memory" role="tabpanel">
+                    <div class="sc-row">
+                        <label for="sc_context_budget">
+                            <span>Memory budget</span>
+                            <small class="sc-hint">Most memory injected per prompt, wrapper included. Whole snippets only; anything left out stays stored.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input id="sc_context_budget" class="text_pole" type="number" min="1" step="1" />
+                            <select id="sc_context_budget_unit" class="text_pole">
+                                <option value="tokens">Estimated tokens</option>
+                                <option value="characters">Characters</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_snippets_per_layer">
+                            <span>Snippets per layer</span>
+                            <small class="sc-hint">When a layer has more, its oldest snippets merge into the next layer down.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_snippets_per_layer" min="3" max="100" step="1" />
+                            <span id="sc_snippets_per_layer_val" class="sc-val">20</span>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_snippets_per_promotion">
+                            <span>Snippets per merge</span>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_snippets_per_promotion" min="2" max="20" step="1" />
+                            <span id="sc_snippets_per_promotion_val" class="sc-val">2</span>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_max_layers">
+                            <span>Maximum layers</span>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_max_layers" min="1" max="10" step="1" />
+                            <span id="sc_max_layers_val" class="sc-val">5</span>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_archive_promoted">
+                            <input type="checkbox" id="sc_archive_promoted" />
+                            <span>Keep merged snippets in an archive</span>
+                        </label>
+                        <small class="sc-hint">Lets an edit to an old message roll back less memory. Adds about half the summaries' size to the chat file.</small>
+                    </div>
+
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_promotion_name_check">
+                            <input type="checkbox" id="sc_promotion_name_check" />
+                            <span>Check names survive summaries and merges</span>
+                        </label>
+                        <small class="sc-hint">Retries once when a summary drops a protected name, or a merge drops names. Costs a call only when the check fails.</small>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_protected_names">
+                            <span>Protected names</span>
+                            <small class="sc-hint">One per line or comma-separated, such as your main cast and places. Summaries and merges must keep each one that appears in their source.</small>
+                        </label>
+                        <textarea id="sc_protected_names" class="text_pole sc-textarea" rows="3"></textarea>
+                    </div>
+            </div>
+
+            <!-- ═══ Summarizer connection ═══ -->
+            <div class="sc-tab-panel" data-tab="connection" role="tabpanel">
+                    <div id="summaryception_connection_settings" class="summaryception-connection-section">
+                        <small class="sc-hint">Which model writes summaries. A separate, faster model keeps your main connection free.</small>
 
                         <div class="summaryception-setting-row">
                             <label for="sc_summarizer_response_length">
@@ -345,188 +388,13 @@
                             <span id="summaryception_connection_status_text"></span>
                         </div>
                     </div>
+            </div>
 
-                    <!-- Turn Settings -->
-                    <h4 class="sc-section-title">📖 Verbatim Turn Settings</h4>
-
+            <!-- ═══ Prompts ═══ -->
+            <div class="sc-tab-panel" data-tab="prompts" role="tabpanel">
                     <div class="sc-row">
-                        <label for="sc_verbatim_turns">
-                            <span>Verbatim Assistant Turns to Keep</span>
-                            <small class="sc-hint">Recent assistant turns sent word-for-word. Older ones are summarized.</small>
-                        </label>
-                        <div class="sc-slider-row">
-                            <input type="range" id="sc_verbatim_turns" min="1" max="50" step="1" />
-                            <span id="sc_verbatim_turns_val" class="sc-val">10</span>
-                        </div>
-                    </div>
-
-                    <div class="sc-row">
-                        <label for="sc_verbatim_token_budget">
-                            <span>Verbatim Token Limit</span>
-                            <small class="sc-hint">Summarize sooner when recent messages exceed this estimate, always keeping the newest two replies. 0 turns it off.</small>
-                        </label>
-                        <div class="sc-slider-row">
-                            <input type="range" id="sc_verbatim_token_budget" min="0" max="30000" step="500" />
-                            <span id="sc_verbatim_token_budget_val" class="sc-val">6000</span>
-                        </div>
-                    </div>
-
-                    <div class="sc-row">
-                        <label for="sc_turns_per_summary">
-                            <span>Turns per Summary Batch</span>
-                            <small class="sc-hint">When limit is exceeded, this many oldest turns are summarized together into one snippet.</small>
-                        </label>
-                        <div class="sc-slider-row">
-                            <input type="range" id="sc_turns_per_summary" min="1" max="20" step="1" />
-                            <span id="sc_turns_per_summary_val" class="sc-val">3</span>
-                        </div>
-                    </div>
-
-                    <div class="sc-row">
-                        <label class="checkbox_label" for="sc_strict_verbatim_window">
-                            <input type="checkbox" id="sc_strict_verbatim_window" />
-                            <span>Strict Verbatim Window</span>
-                            <small class="sc-hint">Off (recommended): wait until a full batch is past the verbatim limit, so up to Verbatim + Batch − 1 turns stay visible. Fewer summarizer calls, and the prompt start changes once per batch, which keeps backend prompt caches valid longer. On: summarize every turn past the limit immediately (one call per reply).</small>
-                        </label>
-                    </div>
-
-                    <hr class="sc-divider" />
-
-                    <!-- Layer Settings -->
-                    <h4 class="sc-section-title">🔄 Layer Settings (the "ception")</h4>
-
-                    <div class="sc-row">
-                        <label for="sc_context_budget">
-                            <span>Context Budget</span>
-                            <small class="sc-hint">Maximum injected memory including labels and wrapper. Keeps complete facts and snippets; omitted content stays stored. Uses an available tokenizer, otherwise estimates four characters per token. A wrapper larger than this budget produces an empty injection.</small>
-                        </label>
-                        <div class="sc-slider-row">
-                            <input id="sc_context_budget" class="text_pole" type="number" min="1" step="1" />
-                            <select id="sc_context_budget_unit" class="text_pole">
-                                <option value="tokens">Estimated tokens</option>
-                                <option value="characters">Characters</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div class="sc-row">
-                        <label for="sc_snippets_per_layer">
-                            <span>Max Snippets per Layer</span>
-                            <small class="sc-hint">When exceeded, oldest snippets are promoted (re-summarized) into a deeper layer.</small>
-                        </label>
-                        <div class="sc-slider-row">
-                            <input type="range" id="sc_snippets_per_layer" min="3" max="100" step="1" />
-                            <span id="sc_snippets_per_layer_val" class="sc-val">20</span>
-                        </div>
-                    </div>
-
-                    <!-- Custom Prompt Management -->
-                    <div id="sc_custom_prompt_manager" class="sc-custom-prompt-manager" style="display: none;">
-                        <div class="sc-custom-prompt-row">
-                            <div class="sc-custom-prompt-slots">
-                                <label for="sc_custom_prompt_slot">
-                                    <small>Saved Custom Prompts</small>
-                                </label>
-                                <div class="sc-custom-prompt-slot-row">
-                                    <select id="sc_custom_prompt_slot" class="text_pole">
-                                        <option value="">-- Load a saved prompt --</option>
-                                    </select>
-                                    <button id="sc_custom_prompt_load" class="menu_button" title="Load selected prompt">
-                                        <i class="fa-solid fa-folder-open"></i>
-                                    </button>
-                                    <button id="sc_custom_prompt_delete_slot" class="menu_button menu_button_danger" title="Delete selected prompt">
-                                        <i class="fa-solid fa-trash"></i>
-                                    </button>
-                                </div>
-                            </div>
-                            <div class="sc-custom-prompt-actions">
-                                <div class="sc-custom-prompt-save-row">
-                                    <input id="sc_custom_prompt_name" type="text" class="text_pole" placeholder="Prompt name..." />
-                                    <button id="sc_custom_prompt_save" class="menu_button" title="Save current prompt">
-                                        <i class="fa-solid fa-floppy-disk"></i> Save
-                                    </button>
-                                </div>
-                                <div class="sc-custom-prompt-io-row">
-                                    <button id="sc_custom_prompt_export" class="menu_button" title="Export current prompt as .txt">
-                                        <i class="fa-solid fa-file-export"></i> Export
-                                    </button>
-                                    <button id="sc_custom_prompt_import" class="menu_button" title="Import prompt from .txt">
-                                        <i class="fa-solid fa-file-import"></i> Import
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="sc-row">
-                        <label for="sc_snippets_per_promotion">
-                            <span>Snippets per Promotion</span>
-                            <small class="sc-hint">How many oldest snippets merge together when promoting to the next layer.</small>
-                        </label>
-                        <div class="sc-slider-row">
-                            <input type="range" id="sc_snippets_per_promotion" min="2" max="20" step="1" />
-                            <span id="sc_snippets_per_promotion_val" class="sc-val">2</span>
-                        </div>
-                    </div>
-
-                    <div class="sc-row">
-                        <label for="sc_max_layers">
-                            <span>Maximum Layer Depth</span>
-                            <small class="sc-hint">How many recursive layers of summarization are allowed.</small>
-                        </label>
-                        <div class="sc-slider-row">
-                            <input type="range" id="sc_max_layers" min="1" max="10" step="1" />
-                            <span id="sc_max_layers_val" class="sc-val">5</span>
-                        </div>
-                    </div>
-
-                    <div class="sc-row">
-                        <label class="checkbox_label" for="sc_archive_promoted">
-                            <input type="checkbox" id="sc_archive_promoted" />
-                            <span>Archive Merged Snippets</span>
-                            <small class="sc-hint">Keep the snippets a promotion merges in a read-only archive (shown in the Memory Database) instead of discarding them. When an edit or swipe invalidates a merged snippet, its still-valid archived children are restored so less memory has to be rebuilt. Adds roughly half the size of the summaries to the chat's metadata.</small>
-                        </label>
-                    </div>
-
-                    <div class="sc-row">
-                        <label class="checkbox_label" for="sc_promotion_name_check">
-                            <input type="checkbox" id="sc_promotion_name_check" />
-                            <span>Check Names on Promotion</span>
-                            <small class="sc-hint">Before saving a merged snippet, check that names from the merged snippets survived. If too many are missing, retry once listing them; if it still drops them, keep the result and mark the snippet as lossy in the browser and database viewer. Costs one extra call only when a check fails.</small>
-                        </label>
-                    </div>
-
-                    <div class="sc-row">
-                        <label for="sc_protected_names">
-                            <span>Protected Names</span>
-                            <small class="sc-hint">One per line or comma-separated (e.g. your main characters and places). When a protected name appears in the snippets being merged, the merged snippet must keep it. Other capitalized names are checked heuristically, allowing a quarter of them to drop.</small>
-                        </label>
-                        <textarea id="sc_protected_names" class="text_pole sc-textarea" rows="3"></textarea>
-                    </div>
-
-                    <hr class="sc-divider" />
-
-                    <!-- Prompts -->
-                    <h4 class="sc-section-title">✏️ Summarizer Prompts</h4>
-
-                    <div class="sc-row">
-                        <label for="sc_summarizer_system_prompt">
-                            <span>System Prompt</span>
-                        </label>
-                        <textarea id="sc_summarizer_system_prompt" class="text_pole sc-textarea" rows="3"></textarea>
-                    </div>
-
-                    <div class="sc-row">
-                        <label for="sc_summarizer_promotion_prompt">
-                            <span>Layer Merge Prompt</span>
-                            <small>Used only when older snippets merge into a deeper layer. Supports {{player_name}}, {{context_str}} and {{story_txt}}. Leave empty for the built-in prompt.</small>
-                        </label>
-                        <textarea id="sc_summarizer_promotion_prompt" class="text_pole sc-textarea" rows="6"></textarea>
-                    </div>
-
-                    <div class="sc-setting-item">
                         <label for="sc_prompt_preset">
-                            <small>Prompt Preset</small>
+                            <span>Prompt preset</span>
                         </label>
                         <select id="sc_prompt_preset" class="text_pole">
                             <option value="narrative">Narrative State (Default)</option>
@@ -540,28 +408,81 @@
                         </select>
                     </div>
 
+                    <div id="sc_custom_prompt_manager" class="sc-custom-prompt-manager" style="display: none;">
+                        <div class="sc-custom-prompt-row">
+                            <div class="sc-custom-prompt-slots">
+                                <label for="sc_custom_prompt_slot">
+                                    <small>Saved custom prompts</small>
+                                </label>
+                                <div class="sc-custom-prompt-slot-row">
+                                    <select id="sc_custom_prompt_slot" class="text_pole">
+                                        <option value="">-- Load a saved prompt --</option>
+                                    </select>
+                                    <button id="sc_custom_prompt_load" class="menu_button" type="button" title="Load selected prompt">
+                                        <i class="fa-solid fa-folder-open"></i>
+                                    </button>
+                                    <button id="sc_custom_prompt_delete_slot" class="menu_button menu_button_danger" type="button" title="Delete selected prompt">
+                                        <i class="fa-solid fa-trash"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="sc-custom-prompt-actions">
+                                <div class="sc-custom-prompt-save-row">
+                                    <input id="sc_custom_prompt_name" type="text" class="text_pole" placeholder="Prompt name..." />
+                                    <button id="sc_custom_prompt_save" class="menu_button" type="button" title="Save current prompt">
+                                        <i class="fa-solid fa-floppy-disk"></i> Save
+                                    </button>
+                                </div>
+                                <div class="sc-custom-prompt-io-row">
+                                    <button id="sc_custom_prompt_export" class="menu_button" type="button" title="Export current prompt as .txt">
+                                        <i class="fa-solid fa-file-export"></i> Export
+                                    </button>
+                                    <button id="sc_custom_prompt_import" class="menu_button" type="button" title="Import prompt from .txt">
+                                        <i class="fa-solid fa-file-import"></i> Import
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="sc-row">
                         <label for="sc_summarizer_user_prompt">
-                            <span>User Prompt (Turn → Snippet & Layer Promotion)</span>
-                            <small class="sc-hint">
-                                Variables: <code>{{player_name}}</code> <code>{{context_str}}</code> (that layer's existing snippets) <code>{{story_txt}}</code> (passage to summarize)
-                            </small>
+                            <span>Summary prompt</span>
+                            <small class="sc-hint">Variables: <code>{{player_name}}</code> <code>{{context_str}}</code> (earlier memory) <code>{{story_txt}}</code> (messages to summarize). Editing switches the preset to Custom.</small>
                         </label>
                         <textarea id="sc_summarizer_user_prompt" class="text_pole sc-textarea sc-textarea-tall" rows="10"></textarea>
                     </div>
 
                     <div class="sc-row">
-                        <label for="sc_injection_template">
-                            <span>Injection Wrapper Template</span>
-                            <small class="sc-hint">Wraps the assembled block. Use <code>{{summary}}</code> for the combined text. If the placeholder is missing, Summaryception appends the summary instead of silently injecting an empty wrapper.</small>
+                        <label for="sc_summarizer_system_prompt">
+                            <span>System prompt</span>
                         </label>
-                        <textarea id="sc_injection_template" class="text_pole sc-textarea" rows="3"></textarea>
+                        <textarea id="sc_summarizer_system_prompt" class="text_pole sc-textarea" rows="3"></textarea>
                     </div>
 
                     <div class="sc-row">
+                        <label for="sc_summarizer_promotion_prompt">
+                            <span>Layer merge prompt</span>
+                            <small class="sc-hint">Used only when old snippets merge into a deeper layer. Same variables. Empty uses the built-in prompt.</small>
+                        </label>
+                        <textarea id="sc_summarizer_promotion_prompt" class="text_pole sc-textarea" rows="6"></textarea>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_strip_patterns">
+                            <span>Strip from replies (one per line)</span>
+                            <small class="sc-hint">Text removed from summarizer output, such as reasoning tags.</small>
+                        </label>
+                        <textarea id="sc_strip_patterns" class="text_pole sc-textarea" rows="4"></textarea>
+                    </div>
+            </div>
+
+            <!-- ═══ Injection ═══ -->
+            <div class="sc-tab-panel" data-tab="injection" role="tabpanel">
+                    <div class="sc-row">
                         <label for="sc_injection_position">
-                            <span>Injection Position</span>
-                            <small class="sc-hint">Prompt is the most reliable option and matches SillyTavern's native summary memory. In Chat lets you place the summary at a message depth.</small>
+                            <span>Position</span>
+                            <small class="sc-hint">Prompt is the most reliable and matches SillyTavern's own summary.</small>
                         </label>
                         <select id="sc_injection_position" class="text_pole">
                             <option value="in_prompt">Prompt (reliable default)</option>
@@ -570,19 +491,20 @@
                         </select>
                     </div>
 
-                    <div class="sc-slider-row">
-                        <label for="sc_injection_depth">In-Chat Injection Depth</label>
-                        <input type="range" id="sc_injection_depth" min="0" max="100" step="1" />
-                        <span id="sc_injection_depth_val" class="sc-val">2</span>
+                    <div id="sc_injection_depth_row" class="sc-row">
+                        <label for="sc_injection_depth">In-chat depth</label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_injection_depth" min="0" max="100" step="1" />
+                            <span id="sc_injection_depth_val" class="sc-val">2</span>
+                        </div>
                     </div>
 
                     <div class="sc-row">
                         <label for="sc_injection_role">
-                            <span>Injection Role</span>
-                            <small class="sc-hint">System is recommended for summaries. Use User or Assistant only if your preset expects it.</small>
+                            <span>Role</span>
                         </label>
                         <select id="sc_injection_role" class="text_pole">
-                            <option value="system">System</option>
+                            <option value="system">System (recommended)</option>
                             <option value="user">User</option>
                             <option value="assistant">Assistant</option>
                         </select>
@@ -591,62 +513,109 @@
                     <div class="sc-row">
                         <label class="checkbox_label" for="sc_injection_scan">
                             <input type="checkbox" id="sc_injection_scan" />
-                            <span>Include injected summary in World Info scans</span>
+                            <span>Include memory in World Info scans</span>
                         </label>
                     </div>
 
+                    <div class="sc-row">
+                        <label for="sc_injection_template">
+                            <span>Wrapper template</span>
+                            <small class="sc-hint">Wraps the memory. <code>{{summary}}</code> marks where it goes; without it the memory is appended.</small>
+                        </label>
+                        <textarea id="sc_injection_template" class="text_pole sc-textarea" rows="3"></textarea>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_preview"><span>Memory preview</span></label>
+                        <textarea id="sc_preview" class="text_pole sc-textarea sc-preview" rows="6" readonly></textarea>
+                    </div>
                     <div class="sc-button-row">
-                        <button id="sc_test_injection" class="menu_button">
-                            <i class="fa-solid fa-vial-circle-check"></i> Test Injection Registration
+                        <button id="sc_refresh_preview" class="menu_button" type="button">
+                            <i class="fa-solid fa-rotate"></i> Refresh
+                        </button>
+                        <button id="sc_copy_injected" class="menu_button" type="button">
+                            <i class="fa-solid fa-copy"></i> Copy Injected
+                        </button>
+                        <button id="sc_test_injection" class="menu_button" type="button">
+                            <i class="fa-solid fa-vial-circle-check"></i> Test Registration
                         </button>
                     </div>
+                    <div id="sc_injection_inspector" class="sc-stats-box"></div>
 
-                    <hr class="sc-divider" />
-
-                    <!-- Strip Patterns -->
-                    <div class="sc-row">
-                        <label for="sc_strip_patterns">
-                            <span>Strip Patterns (one per line)</span>
-                            <small class="sc-hint">Tags and prefixes to remove from summarizer output. Handles reasoning model artifacts.</small>
-                        </label>
-                        <textarea id="sc_strip_patterns" class="text_pole sc-textarea" rows="4"></textarea>
-                    </div>
-
-                    <hr class="sc-divider" />
-
-                    <!-- Debug -->
                     <div class="sc-row">
                         <label class="checkbox_label" for="sc_injection_debug_overlay_enabled">
                             <input type="checkbox" id="sc_injection_debug_overlay_enabled" />
-                            <span>Show Injection Debug Overlay</span>
+                            <span>Show live injection overlay</span>
                         </label>
-                        <small class="sc-hint">Off by default. Shows the live registered summary, placement, budget, and omissions while you debug.</small>
+                    </div>
+            </div>
+
+            <!-- ═══ Tools and maintenance ═══ -->
+            <div class="sc-tab-panel" data-tab="tools" role="tabpanel">
+                    <h4 class="sc-section-title">Regenerate</h4>
+                    <div class="sc-button-row">
+                        <select id="sc_regenerate_scope" class="text_pole" aria-label="Summaries to regenerate">
+                            <option value="latest">Latest summary</option>
+                            <option value="all">All summaries</option>
+                        </select>
+                        <button id="sc_regenerate_latest" class="menu_button" type="button">
+                            <i class="fa-solid fa-rotate-right"></i> Regenerate
+                        </button>
+                    </div>
+                    <small class="sc-hint">Rewrites summaries from the original messages with the current prompt. Stop keeps the originals.</small>
+
+                    <h4 class="sc-section-title">Backup</h4>
+                    <div class="sc-button-row">
+                        <button id="sc_export" class="menu_button" type="button">
+                            <i class="fa-solid fa-upload"></i> Export Memory
+                        </button>
+                        <button id="sc_import" class="menu_button" type="button">
+                            <i class="fa-solid fa-download"></i> Import Memory
+                        </button>
+                    </div>
+
+                    <h4 class="sc-section-title">Behaviour</h4>
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_separate_by_character">
+                            <input type="checkbox" id="sc_separate_by_character" />
+                            <span>Separate memory per character card</span>
+                        </label>
+                        <small class="sc-hint">Each card in a chat gets its own memory. Message hiding is still per chat.</small>
+                    </div>
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_disable_ghosting">
+                            <input type="checkbox" id="sc_disable_ghosting" />
+                            <span>Don't hide summarized messages</span>
+                        </label>
+                        <small class="sc-hint">Keeps summarizing without hiding messages, for other memory extensions.</small>
                     </div>
                     <div class="sc-row">
                         <label class="checkbox_label" for="sc_debug_mode">
                             <input type="checkbox" id="sc_debug_mode" />
-                            <span>Debug Mode (verbose console logs)</span>
+                            <span>Debug logs in the browser console</span>
                         </label>
                     </div>
-
                     <div class="sc-row">
                         <label class="checkbox_label" for="sc_trace_mode">
                             <input type="checkbox" id="sc_trace_mode" />
-                            <span>Trace Mode (detailed flow logs)</span>
+                            <span>Detailed trace logs (needs debug logs)</span>
                         </label>
-                        <small class="sc-hint">Requires Debug Mode to be enabled.</small>
                     </div>
 
-                    <hr class="sc-divider" />
-
-                    <!-- Reset defaults -->
+                    <h4 class="sc-section-title">Repair &amp; reset</h4>
                     <div class="sc-button-row">
-                        <button id="sc_reset_defaults" class="menu_button">
-                            <i class="fa-solid fa-arrow-rotate-left"></i> Reset to Defaults
+                        <button id="sc_repair" class="menu_button" type="button" title="Re-hide summarized messages and unhide ones memory no longer covers.">
+                            <i class="fa-solid fa-wrench"></i> Repair Hidden Messages
+                        </button>
+                        <button id="sc_reset_defaults" class="menu_button" type="button" title="Chat memory and saved profiles/prompts are kept.">
+                            <i class="fa-solid fa-arrow-rotate-left"></i> Reset Settings
                         </button>
                     </div>
-
-                </div>
+                    <div class="sc-button-row sc-danger-zone">
+                        <button id="sc_cleanup_legacy_banks" class="menu_button menu_button_danger" type="button">
+                            <i class="fa-solid fa-broom"></i> Clean Up Legacy Banks
+                        </button>
+                    </div>
             </div>
 
         </div>

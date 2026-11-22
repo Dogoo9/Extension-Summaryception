@@ -5,7 +5,7 @@
 
 const MODULE_NAME = 'summaryception';
 const LOG_PREFIX = '[Summaryception]';
-const EXTENSION_VERSION = '5.5.7';
+const EXTENSION_VERSION = '5.6.0';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  TUNING — Centralised operational constants.
@@ -151,6 +151,7 @@ const defaultSettings = Object.freeze({
 
     debugMode: false,
     traceMode: false,
+    activeTab: 'timing',        // settings panel tab shown last
     injectionDebugOverlay: false,
 
     // ─── Connection Settings ─────────────────────────────────────

@@ -218,8 +218,22 @@ async function summarizeOneBatchFromTurns(visibleTurns, run = state.activeRun) {
     const transaction = captureTransaction(run.target, endIdx);
     const range = [passageStart, endIdx];
     const started = performance.now();
-    const result = await callSummarizer(storyTxt, buildFullContext(0));
+    let result = await callSummarizer(storyTxt, buildFullContext(0));
     if (!result || !runIsCurrent(run) || !transactionIsCurrent(transaction)) return false;
+    // Only the user's protected names: a heuristic over raw prose flags contractions,
+    // nicknames and labels, and would retry nearly every batch.
+    const keep = parseNameList(s.protectedNames);
+    if (s.promotionNameCheck && keep.length) {
+        const missing = checkNameRetention([storyTxt], result, { protectedNames: keep }).missingProtected;
+        if (missing.length) {
+            log(`Batch summary dropped protected names: ${missing.join(', ')}. Retrying once.`);
+            const retry = await callSummarizer(storyTxt, buildFullContext(0), {
+                extraInstructions: `The passage names the following, and your bullets must mention every one of them: ${missing.join(', ')}.`,
+            });
+            if (!runIsCurrent(run) || !transactionIsCurrent(transaction)) return false;
+            if (retry && checkNameRetention([storyTxt], retry, { protectedNames: keep }).missingProtected.length < missing.length) result = retry;
+        }
+    }
     if (!store.layers[0]) store.layers[0] = [];
     store.layers[0].push({ id: newSnippetId(), text: result, turnRange: range, timestamp: Date.now() });
     store.summarizedUpTo = endIdx;

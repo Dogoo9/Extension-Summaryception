@@ -87,6 +87,7 @@ function normalizeChatStore(store) {
     // Retire fact snapshots and legacy recall metadata while preserving prose,
     // ranges, signatures, and visibility ownership from older saves/imports.
     delete store.structuredState;
+    delete store.notes;
     delete store.lastFactBatch;
     if (store.lastBatch) delete store.lastBatch.structuredState;
     for (const snippet of store.layers.flat()) delete snippet.recall;

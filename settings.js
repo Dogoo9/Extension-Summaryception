@@ -36,9 +36,11 @@ function getSettings() {
         }
     }
     const settings = extensionSettings[MODULE_NAME];
-    if (Object.hasOwn(settings, 'structuredStateEnabled') || Object.hasOwn(settings, 'stateTokenAllowance')) {
+    if (['structuredStateEnabled', 'stateTokenAllowance', 'characterNotesEnabled', 'characterNotesBudget'].some(key => Object.hasOwn(settings, key))) {
         delete settings.structuredStateEnabled;
         delete settings.stateTokenAllowance;
+        delete settings.characterNotesEnabled;
+        delete settings.characterNotesBudget;
         SillyTavern.getContext().saveSettingsDebounced();
     }
     return settings;

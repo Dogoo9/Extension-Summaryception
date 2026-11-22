@@ -1,5 +1,5 @@
 /**
- * Summaryception v5.5.7 — Layered Recursive Summarization for SillyTavern
+ * Summaryception v5.6.0 — Layered Recursive Summarization for SillyTavern
  *
  * NON-DESTRUCTIVE: Uses SillyTavern's native /hide and /unhide commands
  * to exclude summarized messages from LLM context while keeping them

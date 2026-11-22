@@ -666,3 +666,18 @@ test('exact old built-in prompts upgrade and custom text is left alone', () => {
     r.api.updateUI();
     assert.match(s.summarizerSystemPrompt, /appended/); assert.equal(s.summarizerUserPrompt, 'Mine {{story_txt}}');
 });
+
+test('settings tabs show one panel at a time and remember the last one', async () => {
+    const r = runtime();
+    r.api.bindUIEvents(); r.api.updateUI();
+    const doc = r.dom.window.document;
+    const visible = () => [...doc.querySelectorAll('.sc-tab-panel')].filter(p => !p.hidden).map(p => p.dataset.tab);
+    assert.deepEqual(visible(), ['timing']);
+    doc.querySelector('.sc-tab[data-tab="tools"]').id = 'tab_tools';
+    await r.click('tab_tools');
+    assert.deepEqual(visible(), ['tools']);
+    assert.equal(r.api.getSettings().activeTab, 'tools');
+    assert.ok(doc.querySelector('.sc-primary-actions #sc_clear_memory'), 'Clear Memory sits in the top row');
+    r.api.getSettings().activeTab = 'gone'; r.api.updateUI();
+    assert.deepEqual(visible(), ['timing'], 'an unknown saved tab falls back to the first');
+});

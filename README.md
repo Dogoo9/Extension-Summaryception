@@ -198,33 +198,11 @@ All settings are adjustable from the SillyTavern Extensions panel:
 | Snippets per Promotion | 5 | How many snippets merge on promotion |
 | Max Layers | 5 | Maximum recursion depth |
 | Archive Merged Snippets | On | Keep merged snippets in a read-only archive with stable ids (parent `childIds`, child `parentId`); edits that invalidate a merged snippet restore its unaffected children |
-| Check Names on Promotion | On | Before saving a merged snippet, verify names from its inputs survived; retry once listing the missing ones, else keep it and mark it lossy |
-| Protected Names | (empty) | Names (one per line or comma-separated) a promotion must keep whenever they appear in the merged snippets |
+| Check Names on Promotion | On | Before saving a merged snippet, verify names from its inputs survived; retry once listing the missing ones, else keep it and mark it lossy. New batch summaries are checked against Protected Names only and retried once if one is missing |
+| Protected Names | (empty) | Names (one per line or comma-separated) that batch summaries and promotions must keep whenever they appear in their source |
 
-### Prompt Presets
+The settings panel keeps the status and everyday controls (on, paused, Summarize Now, Stop, Memory Database, Clear Memory) at the top, with the rest on tabs: Timing, Memory, Connection, Prompts, Injection and Tools. The panel reopens on the last tab used.
 
-| Preset | Best For | Focus |
-|---|---|---|
-| **Narrative State** (default) | Character RP, drama, thrillers, romance | Interactions, emotions, relationships, atmosphere, subtext |
-| **Game State** | Roguelites, strategy, mechanical games | Plot points, quests, locations, interactables, state changes |
-| **Concise Delta** | Small context budgets | Only consequential changes, at most eight phrases |
-| **Chronological Events** | Event-heavy stories | Ordered scene changes, causes, consequences |
-| **Relationships & Emotional Changes** | Character drama and romance | Trust, intimacy, conflict, commitments |
-| **Plot Threads & Goals** | Mysteries and campaigns | Introduced, advanced, and resolved threads |
-| **Continuity Recap** | General long-form RP | Balanced events, relationships, and continuity |
-| **Custom** | Your own prompt | Whatever you write |
-
-Select a preset from the dropdown in Summary Prompts, or edit the prompt directly — it auto-switches to Custom. The new presets are original adaptations of recurring community approaches discussed in [What is your best summarization prompt?](https://www.reddit.com/r/SillyTavernAI/comments/1urjdn7/what_is_your_best_summarization_prompt/) and [Prompt for summaryception](https://www.reddit.com/r/SillyTavernAI/comments/1whc4fx/prompt_for_summaryception/): meaningful chronological changes, relationships, and unresolved threads. They keep the extension's incremental prior-context contract rather than requesting a full recap on each batch.
-
-Plus fully customizable:
-- 📝 Summarizer system prompt
-- 📝 Summarizer user prompt (with `{{player_name}}`, `{{context_str}}`, `{{story_txt}}` variables)
-- 📝 Layer merge prompt, used only for promotions (same variables)
-- 📝 Injection wrapper template
-- 📍 Injection position, in-chat depth, role, and World Info scanning
-
-
----
 
 ## 🃏 Per-Character Memory Banks
 
@@ -232,7 +210,7 @@ Summaryception can keep memory separated by the active character card inside eac
 
 Existing single-bank memories are migrated automatically to the currently active card the first time the feature is used. Banks now retain a card identity record (stable SillyTavern card identifier when available, normalized avatar/card filename, display name, and former keys). Legacy numeric-id banks are migrated only when their saved attachment matches the active card; ambiguous matches remain separate and are called out in the database viewer and exports.
 
-When an ambiguous migration preserves obsolete numeric banks, open **View Memory Database** to export and delete banks individually, or choose **Clean Up Legacy Banks** to delete every inactive `character:<number>` bank after one confirmation. The active card bank and shared chat bank are protected from deletion; use **Clear Memory** when you intend to reset the active bank.
+When an ambiguous migration preserves obsolete numeric banks, open **Memory Database** to export and delete banks individually, or choose **Clean Up Legacy Banks** to delete every inactive `character:<number>` bank after one confirmation. The active card bank and shared chat bank are protected from deletion; use **Clear Memory** (top of the panel) when you intend to reset the active bank.
 
 ### Limitations
 
@@ -272,11 +250,11 @@ Fork connection settings can be saved as named profiles, updated, duplicated, an
 - **Memory Database Viewer** — Search every character bank, edit, pin or regenerate snippets, roll memory back from a snippet, export a bank, and inspect its raw JSON. Pinned snippets skip layer merges and are selected first for the injection budget
 - **Verbatim Token Limit** — Summarizes earlier when recent messages exceed an estimated token limit, always keeping the newest two replies
 - **Export/Import** — Save and restore the active memory bank as JSON
-- **Force Summarize** — Manually trigger summarization; automatic/backlog processing preserves the verbatim window, while explicit single-batch force can summarize within it
+- **Summarize Now** — Manually trigger summarization; automatic/backlog processing preserves the verbatim window, while explicit single-batch force can summarize within it
 - **Stop / Cancel Backlog** — Abort the active run; completed backlog batches stay saved
-- **Repair** — Repair Summaryception-owned visibility while preserving manually hidden messages
+- **Repair Hidden Messages** — Repair Summaryception-owned visibility while preserving manually hidden messages
 - **Saved Custom Prompts** — Save, load, delete, import, and export prompt text
-- **Reset to Defaults** — Reset settings while preserving chat memory and saved profiles/prompts
+- **Reset Settings** — Reset settings while preserving chat memory and saved profiles/prompts
 - **Slash Commands** — `/sc-status`, `/sc-preview`, `/sc-db`, `/sc-clear`
 
 ---
@@ -310,7 +288,7 @@ Edits, swipes, deletions, and branches invalidate affected summaries across ever
 
 ### Cancellation and Regeneration
 
-**Cancel Backlog** appears beside a progress bar while processing and in the progress toast. **Stop** also cancels batches, retries, promotions, and regeneration. Already committed batches finish saving their message visibility; later batches do not start. Use **Force Summarize Now** to resume from the saved cutoff. **Cancel** in the initial backlog dialog closes it without skipping or summarizing history.
+**Cancel Backlog** appears beside a progress bar while processing and in the progress toast. **Stop** also cancels batches, retries, promotions, and regeneration. Already committed batches finish saving their message visibility; later batches do not start. Use **Summarize Now** to resume from the saved cutoff. **Cancel** in the initial backlog dialog closes it without skipping or summarizing history.
 
 Select **Latest summary** or **All summaries**, then **Regenerate Summaries** to use the current prompt on the original source messages. Each snippet also has a regenerate control, including promoted snippets with retained source ranges. Earlier context is bounded by the configured budget and excludes future summaries. Bulk regeneration stages replacements in chronological order and only commits after every response succeeds; cancellation or a model failure keeps the originals. It preserves layer structure, source ranges, and message visibility. Older snippets without source ranges can still be edited manually. A promoted snippet can cover a large original passage; if the backend rejects that input, the old summary is kept.
 
