@@ -23,11 +23,12 @@ export function runtime(settings = {}, includeInit = false) {
         setExtensionPrompt(name, value, position, depth, scan, role) { ctx.extensionPrompts[name] = { value, position, depth, scan, role }; },
         async executeSlashCommandsWithOptions(command) {
             hides.push(command);
-            const index = Number(command.split(' ')[1]);
-            const m = ctx.chat[index];
-            if (!m) return;
-            if (command.startsWith('/hide')) { m.is_system = true; m.is_hidden = true; }
-            else { m.is_system = false; delete m.is_hidden; }
+            // Like SillyTavern's /hide and /unhide: one index or an a-b range; only is_system changes.
+            const [start, end = start] = command.split(' ')[1].split('-').map(Number);
+            for (let index = start; index <= end; index++) {
+                const m = ctx.chat[index];
+                if (m) m.is_system = command.startsWith('/hide');
+            }
         },
         ConnectionManagerRequestService: { handleDropdown() {} },
     };

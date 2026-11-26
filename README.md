@@ -126,7 +126,8 @@ Actual context use depends on passage length, selected memories, tokenizer, wrap
 Summaryception never deletes your messages. Summarized turns are **ghosted** — hidden from the LLM context but fully visible and readable in your chat UI. Scroll up anytime to read the original prose.
 
 - 👻 Ghosted messages show a system icon in the chat
-- Clear Memory unghosts everything instantly
+- Clear Memory unghosts everything it hid. Each hidden message carries Summaryception's own marker, which is the only record of ownership: messages you hid yourself are never touched, and a message whose unhide fails stays marked so Clear or Repair can retry it
+- Consecutive messages are hidden and unhidden with one range command, so long chats clear quickly
 - Your chat file is never modified destructively
 
 ---
@@ -298,7 +299,7 @@ Enable **Advanced Settings → Show Injection Debug Overlay** when debugging. Th
 
 ### Validation
 
-Run `npm ci` then `npm test` (Node.js with `--test-isolation=none` support). The suite covers request cancellation, saved backlog progress, atomic regeneration, source edits and card/chat switches, preset/custom prompts, overlay escaping and updates, legacy migration, whole-snippet budgets, tokenization/settings races, and connection timeout cleanup. Model responses are mocked; this does not establish real-model summary quality or validate a live SillyTavern installation.
+Run `npm ci` then `npm test` (Node.js 22 or newer). The suite covers request cancellation, saved backlog progress, atomic regeneration, source edits and card/chat switches, preset/custom prompts, overlay escaping and updates, legacy migration, message hiding ownership (stale index lists, failed unhides, clearing mid-hide, rollback display), whole-snippet budgets, tokenization/settings races, and connection timeout cleanup. Model responses are mocked; this does not establish real-model summary quality or validate a live SillyTavern installation.
 
 The extension is a set of ES modules; `index.js` lists what each file holds. Shared mutable runtime state (the run lock, abort controller, chat epoch and similar) lives on the single `state` object in `state.js`, because a module cannot reassign another module's bindings. `tests/runtime-helper.js` evaluates the modules as one script in dependency order so tests can reach internals, and `tests/modules.test.js` loads the real module graph so a missing export fails the suite. When adding a module, add it to both lists.
 

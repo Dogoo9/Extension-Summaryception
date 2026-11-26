@@ -7,7 +7,6 @@ import {
     firstSourceChange,
 } from './source-signatures.js';
 import {
-    LOG_PREFIX,
     TUNING,
 } from './constants.js';
 import {
@@ -20,6 +19,7 @@ import {
 import {
     getAllMemoryStores,
     getChatStore,
+    getSummarizedRangeStart,
     invalidateContextCache,
     normalizeChatStore,
     recalculateSummarizedUpTo,
@@ -32,69 +32,88 @@ import {
     targetIsCurrent,
 } from './run.js';
 
+// The sc_ghosted flag on each message is the only record of what Summaryception
+// hid. store.ghostedIndices is derived from it (for display and old saves) and
+// is rebuilt after every visibility change instead of being trusted.
+function flaggedIndices(chat) {
+    return (chat || []).flatMap((msg, i) => msg?.extra?.sc_ghosted ? [i] : []);
+}
+
+function syncGhostedIndices(store, chat) {
+    if (store) store.ghostedIndices = flaggedIndices(chat);
+}
+
+function toRanges(indices) {
+    const sorted = [...new Set(indices)].sort((a, b) => a - b);
+    const ranges = [];
+    for (const i of sorted) {
+        const last = ranges.at(-1);
+        if (last && i === last[1] + 1) last[1] = i;
+        else ranges.push([i, i]);
+    }
+    return ranges;
+}
+
+// One /hide or /unhide per contiguous run: SillyTavern saves the chat after each
+// command, so per-message commands made long chats slow to clear. Runs only ever
+// contain messages this extension owns, so a range never touches anything else.
+// A failed range is retried message by message. Returns the indices that changed.
+async function setRangeVisibility(start, end, hide) {
+    const run = async arg => {
+        await SillyTavern.getContext().executeSlashCommandsWithOptions(`/${hide ? 'hide' : 'unhide'} ${arg}`, { showOutput: false });
+    };
+    try {
+        await run(start === end ? `${start}` : `${start}-${end}`);
+        return Array.from({ length: end - start + 1 }, (_, k) => start + k);
+    } catch (e) {
+        if (start === end) {
+            log(`Failed to ${hide ? 'hide' : 'unhide'} message ${start}:`, e);
+            return [];
+        }
+    }
+    const done = [];
+    for (let i = start; i <= end; i++) {
+        try { await run(`${i}`); done.push(i); } catch (e) { log(`Failed to ${hide ? 'hide' : 'unhide'} message ${i}:`, e); }
+    }
+    return done;
+}
+
+/**
+ * Unhide every message Summaryception hid. A message keeps its flag until its
+ * /unhide succeeds, so a failure never leaves it hidden and unowned.
+ */
 async function unghostAllMessages(storeOverride = null) {
     const { chat } = SillyTavern.getContext();
     const store = storeOverride ? normalizeChatStore(storeOverride) : getChatStore();
     const target = captureMemoryTarget();
-
-    // Only unhide messages that WE ghosted, not user-hidden messages
-    const toUnhide = store.ghostedIndices && store.ghostedIndices.length > 0
-        ? [...store.ghostedIndices]
-        : [];
-
-    // Fallback for older saves that don't have ghostedIndices:
-    // find messages with our sc_ghosted flag
-    if (toUnhide.length === 0) {
-        for (let i = 0; i < chat.length; i++) {
-            if (chat[i]?.extra?.sc_ghosted) {
-                toUnhide.push(i);
-            }
-        }
-    }
-
-    if (toUnhide.length === 0) return;
+    const flagged = flaggedIndices(chat);
+    const hidden = flagged.filter(i => chat[i].is_system);
+    // Flagged but visible (hiding disabled, or unhidden by hand): just release.
+    for (const i of flagged) if (!chat[i].is_system) delete chat[i].extra.sc_ghosted;
+    if (!hidden.length) { syncGhostedIndices(store, chat); return; }
 
     const progressToast = toastr.info(
-        `Unhiding messages: 0 / ${toUnhide.length}`,
+        `Unhiding messages: 0 / ${hidden.length}`,
         'Summaryception — Clearing',
-        {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            tapToDismiss: false,
-        }
+        { timeOut: 0, extendedTimeOut: 0, tapToDismiss: false },
     );
-
     let processed = 0;
+    let failed = 0;
     try {
-        for (const idx of toUnhide) {
+        for (const [start, end] of toRanges(hidden)) {
             if (!targetIsCurrent(target)) return;
-            if (idx >= 0 && idx < chat.length) {
-                if (!chat[idx]?.extra?.sc_ghosted) continue;
-                // Clear our ghost flag
-                if (chat[idx]?.extra?.sc_ghosted) {
-                    delete chat[idx].extra.sc_ghosted;
-                }
-
-                try {
-                    await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${idx}`, { showOutput: false });
-                } catch (e) {
-                    log(`Failed to unhide message ${idx}:`, e);
-                }
-            }
-
-            processed++;
-            if (processed % TUNING.ghostProgressInterval === 0 || processed === toUnhide.length) {
-                const pct = Math.round((processed / toUnhide.length) * 100);
-                $(progressToast).find('.toast-message').text(
-                    `Unhiding messages: ${processed} / ${toUnhide.length} (${pct}%)`
-                );
-            }
+            const done = await setRangeVisibility(start, end, false);
+            if (target.chat !== SillyTavern.getContext().chat) return;
+            for (const i of done) delete chat[i]?.extra?.sc_ghosted;
+            failed += end - start + 1 - done.length;
+            processed += end - start + 1;
+            const pct = Math.round((processed / hidden.length) * 100);
+            $(progressToast).find('.toast-message').text(`Unhiding messages: ${processed} / ${hidden.length} (${pct}%)`);
         }
-
-        // Clear the tracking array
-        store.ghostedIndices = [];
-        log(`Unghosted ${toUnhide.length} messages (only Summaryception-hidden ones)`);
+        log(`Unghosted ${hidden.length - failed} messages (only Summaryception-hidden ones)`);
+        if (failed) toastr.warning(`${failed} message(s) could not be unhidden. They stay marked, so Clear Memory or Repair can try again.`, 'Summaryception');
     } finally {
+        syncGhostedIndices(store, chat);
         clearPersistentToast(progressToast);
     }
 }
@@ -107,73 +126,74 @@ async function unghostAllMessages(storeOverride = null) {
 async function releaseStaleGhosts(startIndex, endIndex, target = captureMemoryTarget()) {
     const { chat, store } = target;
     const hide = !getSettings().disableGhosting;
+    const toUnhide = [];
     for (let i = 0; i < chat.length; i++) {
         const msg = chat[i];
         if (!msg?.extra?.sc_ghosted) continue;
         const hidden = Boolean(msg.is_system);
         if (i >= startIndex && i <= endIndex && hidden === hide) continue;
-        if (!targetIsCurrent(target)) return;
-        delete msg.extra.sc_ghosted;
-        if (!hidden) continue;
-        try {
-            await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${i}`, { showOutput: false });
-        } catch (e) {
-            log(`Failed to unhide message ${i}:`, e);
-        }
+        if (hidden) toUnhide.push(i);
+        else delete msg.extra.sc_ghosted;
     }
-    if (!targetIsCurrent(target)) return;
-    store.ghostedIndices = chat.flatMap((msg, i) => msg?.extra?.sc_ghosted ? [i] : []);
+    for (const [start, end] of toRanges(toUnhide)) {
+        if (!targetIsCurrent(target)) break;
+        for (const i of await setRangeVisibility(start, end, false)) delete chat[i]?.extra?.sc_ghosted;
+    }
+    syncGhostedIndices(store, chat);
 }
 
 async function ghostMessagesUpTo(endIndex, startIndex = 0, target = captureMemoryTarget()) {
-    const { chat } = SillyTavern.getContext();
-    const store = getChatStore();
+    const { chat, store } = target;
     const s = getSettings();
 
     const rangeStart = Math.max(0, Number.isInteger(startIndex) ? startIndex : 0);
     const rangeEnd = Math.min(chat.length - 1, Number.isInteger(endIndex) ? endIndex : -1);
     if (rangeStart > rangeEnd) return;
 
-    const ghostedIndices = new Set(store.ghostedIndices);
-    const revision = storeRevisions.get(store) || 0;
-    let newlyGhosted = 0;
-
+    const eligible = [];
     for (let i = rangeStart; i <= rangeEnd; i++) {
-        // Finish visibility for an already committed batch even after Stop.
-        // A source repair, card switch, or disable still invalidates this work.
-        if (!targetIsCurrent(target) || revision !== (storeRevisions.get(store) || 0) || !s.enabled) break;
         const msg = chat[i];
         if (!msg) continue;
-        if (msg.is_system && !msg.extra?.sc_ghosted) continue;
-        if (!msg.extra) msg.extra = {};
-        if (msg.extra.sc_ghosted) continue;
-
-        // Skip messages already hidden by the user (not by us)
-        if (msg.is_hidden) {
+        if (msg.extra?.sc_ghosted) continue;      // already ours
+        if (msg.is_system) continue;              // hidden by the user, or a system message
+        if (msg.is_hidden) {                      // legacy hidden marker
             log(`Skipping message ${i} — already hidden by user`);
             continue;
         }
-
-        if (!s.disableGhosting) {
-            try {
-                // Hide messages individually so system messages and messages hidden by
-                // the user are never accidentally included in a broad slash-command range.
-                await SillyTavern.getContext().executeSlashCommandsWithOptions(
-                    `/hide ${i}`,
-                    { showOutput: false }
-                );
-            } catch (error) {
-                console.error(LOG_PREFIX, `Failed to hide message ${i}:`, error);
-                continue;
-            }
-        }
-
-        msg.extra.sc_ghosted = true;
-        ghostedIndices.add(i);
-        newlyGhosted++;
+        eligible.push(i);
     }
 
-    store.ghostedIndices = [...ghostedIndices].sort((a, b) => a - b);
+    const revision = storeRevisions.get(store) || 0;
+    // Finish visibility for an already committed batch even after Stop.
+    // A source repair, card switch, clear, or disable still invalidates this work.
+    const stillWanted = () => targetIsCurrent(target) && revision === (storeRevisions.get(store) || 0) && s.enabled;
+    const covers = i => targetIsCurrent(target) && s.enabled
+        && i <= store.summarizedUpTo && i >= getSummarizedRangeStart(store);
+    let newlyGhosted = 0;
+
+    for (const [start, end] of toRanges(eligible)) {
+        if (!stillWanted()) break;
+        const done = s.disableGhosting
+            ? Array.from({ length: end - start + 1 }, (_, k) => start + k)
+            : await setRangeVisibility(start, end, true);
+        // The chat closed while /hide ran: mark what was hidden so the old chat
+        // still owns it, and stop (indices would now point into the new chat).
+        const chatChanged = target.chat !== SillyTavern.getContext().chat;
+        // Memory was cleared or rolled back while /hide ran: put those messages back.
+        const unwanted = chatChanged ? [] : done.filter(i => !covers(i));
+        if (unwanted.length && !s.disableGhosting) {
+            for (const [a, b] of toRanges(unwanted)) await setRangeVisibility(a, b, false);
+        }
+        for (const i of done) {
+            if (unwanted.includes(i)) continue;
+            chat[i].extra ||= {};
+            chat[i].extra.sc_ghosted = true;
+            newlyGhosted++;
+        }
+        if (chatChanged || unwanted.length) break;
+    }
+
+    syncGhostedIndices(store, chat);
     log(`Ghosted messages ${rangeStart}–${rangeEnd} (${newlyGhosted} newly marked)${s.disableGhosting ? ' (hiding disabled — metadata only)' : ''}`);
 }
 
@@ -223,17 +243,26 @@ function truncateMemoryStore(store, dirty) {
     if (store.lastBatch?.range?.[1] >= dirty) delete store.lastBatch;
 }
 
+// Synchronous (source repair runs inside prompt assembly), so it updates the
+// message and its rendered block the way /unhide would.
 function restoreUncoveredGhosts() {
     const { chat } = SillyTavern.getContext();
-    const covered = new Set(getChatStore().ghostedIndices);
+    const store = getChatStore();
+    const start = getSummarizedRangeStart(store);
+    const end = store.summarizedUpTo;
+    const hidingDisabled = getSettings().disableGhosting;
     for (let i = 0; i < chat.length; i++) {
         const message = chat[i];
-        if (message?.extra?.sc_ghosted && !covered.has(i)) {
-            delete message.extra.sc_ghosted;
-            delete message.is_hidden;
+        if (!message?.extra?.sc_ghosted || (i >= start && i <= end)) continue;
+        delete message.extra.sc_ghosted;
+        if (hidingDisabled) continue;
+        delete message.is_hidden;
+        if (message.is_system) {
             message.is_system = false;
+            $(`#chat .mes[mesid="${i}"]`).attr('is_system', 'false');
         }
     }
+    syncGhostedIndices(store, chat);
 }
 
 function reconcileMemorySources(changedHint = null) {
@@ -272,6 +301,7 @@ async function repairIfBranched() {
 }
 
 export {
+    flaggedIndices,
     ghostMessagesUpTo,
     reconcileMemorySources,
     releaseStaleGhosts,

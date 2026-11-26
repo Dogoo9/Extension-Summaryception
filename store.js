@@ -7,6 +7,9 @@ import {
     MODULE_NAME,
 } from './constants.js';
 import {
+    state,
+} from './state.js';
+import {
     getSettings,
     log,
 } from './settings.js';
@@ -507,6 +510,9 @@ async function clearActiveMemory() {
     store.summarizedUpTo = -1;
     store.sourceSignatures = [];
     delete store.lastBatch;
+    // An earlier Summarize Now / Skip answered the backlog question for the old
+    // memory. Ask again, instead of quietly re-hiding the oldest batch next reply.
+    state.catchupDismissed = false;
     invalidateContextCache(store);
     await unghostAllMessages(store);
     if (!targetIsCurrent(target)) return;
