@@ -77,10 +77,11 @@ function delayWithSignal(ms, signal) {
     });
 }
 
+// Safe in element text and in quoted attributes (innerHTML leaves quotes alone).
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
-    return div.innerHTML;
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 export {
