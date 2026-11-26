@@ -759,3 +759,15 @@ test('clear asks about the backlog again instead of silently re-hiding old messa
     doc.getElementById('sc_catchup_cancel').click(); await dialog;
     assert.deepEqual(hiddenIndices(r), []); assert.equal(r.requests.length, 0);
 });
+
+test('memory database escapes quotes in attribute values from chat metadata', () => {
+    const r = runtime({ separateMemoryByCharacterCard: true });
+    r.api.getChatStore();
+    const key = 'evil" onmouseover="alert(1)';
+    const root = r.ctx.chatMetadata.summaryception;
+    root.memories[key] = { layers: [[{ text: 'x', turnRange: [0, 0] }]], summarizedUpTo: 0 };
+    r.api.showMemoryDatabaseModal();
+    const doc = r.dom.window.document;
+    assert.equal(doc.querySelectorAll('[onmouseover]').length, 0);
+    assert.ok([...doc.querySelectorAll('.sc-db-bank')].some(el => el.dataset.bankKey === key));
+});

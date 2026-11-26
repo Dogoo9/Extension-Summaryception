@@ -73,6 +73,19 @@ function getProxyHeaders() {
     return { 'Content-Type': 'application/json' };
 }
 
+/**
+ * SillyTavern answers /proxy/ with a plain 404 when enableCorsProxy is off (the
+ * default). fetch() does not throw for that, so callers throw this inside their
+ * proxy attempt to reach the direct-request fallback. A 404 from the target
+ * itself (wrong URL) is passed through unchanged.
+ * @param {Response} response
+ */
+async function throwIfProxyDisabled(response) {
+    if (response?.status !== 404) return;
+    const text = await response.clone().text().catch(() => '');
+    if (/cors proxy is disabled/i.test(text)) throw new Error('SillyTavern CORS proxy is disabled');
+}
+
 // ─── Main Entry Point ────────────────────────────────────────────────
 
 /**
@@ -371,6 +384,7 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt, settings = {}
                 },
             }),
         });
+        await throwIfProxyDisabled(response);
     } catch (proxyError) {
         if (settings.requestSignal?.aborted || proxyError.name === 'AbortError') throw proxyError;
         console.warn(`${MODULE_NAME} CORS proxy failed, trying direct:`, proxyError.message);
@@ -443,6 +457,7 @@ export async function fetchOllamaModels(url) {
             method: 'GET',
             headers: getProxyHeaders(),
         });
+        await throwIfProxyDisabled(response);
     } catch (proxyError) {
         console.warn(`${MODULE_NAME} CORS proxy failed for model list, trying direct:`, proxyError.message);
         try {
@@ -548,6 +563,7 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
             headers: { ...getProxyHeaders(), ...headers },
             body: body,
         });
+        await throwIfProxyDisabled(response);
     } catch (proxyError) {
         if (settings.requestSignal?.aborted || proxyError.name === 'AbortError') throw proxyError;
         console.warn(`${MODULE_NAME} CORS proxy failed for OpenAI endpoint, trying direct:`, proxyError.message);

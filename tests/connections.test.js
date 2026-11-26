@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sendSummarizerRequest } from '../connectionutil.js';
+import { fetchOllamaModels, sendSummarizerRequest } from '../connectionutil.js';
 
 const settings = { connectionSource: 'openai', openaiUrl: 'http://local', openaiModel: 'model', summarizerTimeoutMs: 1000 };
 globalThis.SillyTavern = { getContext: () => ({ getRequestHeaders: () => ({ 'Content-Type': 'application/json' }) }) };
@@ -91,4 +91,27 @@ test('completion and Ollama truncated JSON replies are rejected', async () => {
     await assert.rejects(sendSummarizerRequest({ connectionSource: 'completion', completionUrl: 'http://local' }, 'System', 'User'), /truncated/);
     globalThis.fetch = async () => Response.json({ message: { content: 'Partial' }, done_reason: 'length' });
     await assert.rejects(sendSummarizerRequest({ connectionSource: 'ollama', ollamaUrl: 'http://local', ollamaModel: 'm' }, 'System', 'User'), /truncated/);
+});
+
+// SillyTavern's reply to /proxy/ when enableCorsProxy is off (the default).
+const proxyDisabled = () => new Response('CORS proxy is disabled. Enable it in config.yaml or use the --corsProxy flag.', { status: 404 });
+
+test('a disabled CORS proxy falls back to a direct request for OpenAI, Ollama and the Ollama model list', async () => {
+    const urls = [];
+    const route = direct => async url => { urls.push(url); return url.startsWith('/proxy/') ? proxyDisabled() : direct(); };
+    globalThis.fetch = route(() => Response.json({ choices: [{ message: { content: 'Direct OpenAI' }, finish_reason: 'stop' }] }));
+    assert.equal(await sendSummarizerRequest(settings, 'System', 'User'), 'Direct OpenAI');
+    globalThis.fetch = route(() => Response.json({ message: { content: 'Direct Ollama' } }));
+    assert.equal(await sendSummarizerRequest({ connectionSource: 'ollama', ollamaUrl: 'http://local', ollamaModel: 'model', summarizerTimeoutMs: 1000 }, 'System', 'User'), 'Direct Ollama');
+    globalThis.fetch = route(() => Response.json({ models: [{ name: 'llama' }] }));
+    assert.ok((await fetchOllamaModels('http://local')).length);
+    assert.equal(urls.filter(url => url.startsWith('/proxy/')).length, 3);
+    assert.equal(urls.filter(url => url.startsWith('http://local')).length, 3);
+});
+
+test('a 404 from the target itself is reported, not retried directly', async () => {
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return new Response('model not found', { status: 404 }); };
+    await assert.rejects(sendSummarizerRequest(settings, 'System', 'User'), /404/);
+    assert.equal(calls, 1);
 });
