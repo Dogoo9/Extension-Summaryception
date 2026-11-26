@@ -114,6 +114,10 @@ function updateUI() {
         }
         $('#sc_summarizer_system_prompt').val(s.summarizerSystemPrompt);
         $('#sc_summarizer_promotion_prompt').val(s.summarizerPromotionPrompt);
+        $('#sc_state_block_enabled').prop('checked', s.stateBlockEnabled);
+        $('#sc_state_block_token_limit').val(s.stateBlockTokenLimit);
+        $('#sc_state_block_prompt').val(s.stateBlockPrompt);
+        $('#sc_state_block_system_prompt').val(s.stateBlockSystemPrompt);
         // ── Prompt preset migration & sync ──
         // Upgrade only exact prior built-ins. Never replace user-authored text.
         const currentPrompt = (s.summarizerUserPrompt || '').trim();
@@ -337,6 +341,25 @@ function bindUIEvents() {
         saveSettings();
     });
 
+    $('#sc_state_block_enabled').on('change', function () {
+        const s = getSettings();
+        s.stateBlockEnabled = $(this).prop('checked');
+        saveSettings();
+        updateInjection();
+        updateUI();
+        if (s.stateBlockEnabled) {
+            toastr.info('The current state is built after the next summarized batch. Use Update Now in Memory Database to build it from existing summaries.', 'Summaryception', { timeOut: TUNING.toastLonger });
+        }
+    });
+
+    $('#sc_state_block_token_limit').on('change', function () {
+        const value = parseInt($(this).val(), 10);
+        getSettings().stateBlockTokenLimit = Math.min(1000, Math.max(50, Number.isFinite(value) ? value : defaultSettings.stateBlockTokenLimit));
+        $(this).val(getSettings().stateBlockTokenLimit);
+        saveSettings();
+        updateInjection();
+    });
+
     $('#sc_strict_verbatim_window').on('change', function () {
         getSettings().strictVerbatimWindow = $(this).prop('checked');
         saveSettings();
@@ -430,6 +453,8 @@ function bindUIEvents() {
         { id: '#sc_injection_template', key: 'injectionTemplate' },
         { id: '#sc_summarizer_system_prompt', key: 'summarizerSystemPrompt' },
         { id: '#sc_summarizer_promotion_prompt', key: 'summarizerPromotionPrompt' },
+        { id: '#sc_state_block_prompt', key: 'stateBlockPrompt' },
+        { id: '#sc_state_block_system_prompt', key: 'stateBlockSystemPrompt' },
     ];
 
     for (const ta of textareas) {

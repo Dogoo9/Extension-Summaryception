@@ -57,7 +57,8 @@ export function assembleBudgetedMemory({ narrative, template, meter }) {
     const selected = selectWithRecencyReserve(items, meter.budget, list => meter.count(wrapMemory(template, body(list))));
     return {
         text: selected.length ? wrapMemory(template, body(selected)) : '',
-        omittedSnippets: narrative.length - selected.length,
+        // The current-state block is not a snippet; leave it out of the count.
+        omittedSnippets: narrative.filter(entry => !entry?.state).length - selected.filter(item => !item.state).length,
         meterLabel: meter.label,
     };
 }
@@ -84,7 +85,7 @@ export async function assembleBudgetedMemoryAsync(options, countTokens) {
             if (total <= budget) return { ...report, meterLabel: 'tokens (active tokenizer)', measuredTokens: total };
             trialBudget = Math.max(0, Math.floor(trialBudget * budget / total * 0.9));
         }
-        return { text: '', omittedSnippets: options.narrative.length,
+        return { text: '', omittedSnippets: options.narrative.filter(entry => !entry?.state).length,
             meterLabel: 'tokens (active tokenizer)', measuredTokens: 0 };
     } catch {
         const fallback = assembleBudgetedMemory(options);

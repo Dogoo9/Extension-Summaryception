@@ -39,6 +39,11 @@ import {
 import {
     regenerateSnippets,
 } from './summarize.js';
+import {
+    currentSceneState,
+    editSceneState,
+    refreshSceneState,
+} from './scene-state.js';
 
 function getMemoryBankLabel(key) {
     const { chatMetadata } = SillyTavern.getContext();
@@ -121,6 +126,8 @@ function getMemoryDatabaseSnapshot() {
             snippetCount: layers.reduce((sum, layer) => sum + layer.snippets.length, 0),
             layers,
             archive: (store.archive || []).map(entry => ({ ...entry })),
+            sceneState: currentSceneState(store) ? { ...currentSceneState(store) } : null,
+            stateVersions: (store.stateHistory || []).length,
         };
     });
 
@@ -218,6 +225,24 @@ function buildMemoryDatabaseHtml(snapshot) {
                 <strong>${escapeHtml(String(value))}</strong>
             </div>`).join('');
 
+        const sceneState = bank.sceneState;
+        const showState = sceneState || (bank.active && getSettings().stateBlockEnabled);
+        const stateHtml = showState ? `
+            <div class="sc-db-state" data-bank-key="${escapeHtml(bank.key)}">
+                <div class="sc-db-snippet-meta">Current state · ${sceneState
+                    ? `as of message ${sceneState.through}${sceneState.edited ? ' · edited' : ''} · ${bank.stateVersions} version${bank.stateVersions === 1 ? '' : 's'} kept`
+                    : 'none yet; built after the next summarized batch'}</div>
+                ${sceneState ? `<div class="sc-db-state-text">${escapeHtml(sceneState.text)}</div>` : ''}
+                <div class="sc-db-snippet-actions">
+                    <button class="menu_button sc-db-state-edit-btn" type="button" title="Correct the state by hand. The next update starts from your text.">
+                        <i class="fa-solid fa-pen-to-square"></i> Edit State
+                    </button>
+                    ${bank.active ? `<button class="menu_button sc-db-state-refresh-btn" type="button" title="Rebuild the state now from the latest summarized messages (one summarizer call)">
+                        <i class="fa-solid fa-rotate-right"></i> Update Now
+                    </button>` : ''}
+                </div>
+            </div>` : '';
+
         const migrationWarning = bank.migrationStatus === 'ambiguous-preserved'
             ? '<div class="sc-db-migration-warning">⚠️ Ambiguous identity match; this bank was preserved and not merged.</div>'
             : '';
@@ -239,6 +264,7 @@ function buildMemoryDatabaseHtml(snapshot) {
                 </button>`}
             </div>
             <div class="sc-db-attachments">${attachmentRows}</div>
+            ${stateHtml}
             ${layerHtml}
             ${archiveHtml}
         </details>`;
@@ -337,6 +363,35 @@ function showMemoryDatabaseModal() {
 
     overlay.querySelector('#sc_db_rendered').addEventListener('click', async (event) => {
         if (!targetIsCurrent(target)) { close(); return; }
+
+        const stateEl = event.target.closest('.sc-db-state');
+        if (stateEl) {
+            const store = getMemoryStoreByKey(stateEl.dataset.bankKey);
+            if (!store) { refreshDatabaseView(); return; }
+            if (event.target.closest('.sc-db-state-refresh-btn')) {
+                await refreshSceneState();
+                refreshDatabaseView();
+            } else if (event.target.closest('.sc-db-state-edit-btn') && !stateEl.classList.contains('sc-db-snippet-editing')) {
+                stateEl.classList.add('sc-db-snippet-editing');
+                stateEl.querySelector('.sc-db-state-text')?.remove();
+                stateEl.querySelector('.sc-db-snippet-actions').innerHTML = `
+                    <textarea class="text_pole sc-db-state-edit-area" rows="8">${escapeHtml(currentSceneState(store)?.text || '')}</textarea>
+                    <button class="menu_button sc-db-state-save-btn" type="button"><i class="fa-solid fa-check"></i> Save</button>
+                    <button class="menu_button sc-db-state-cancel-btn" type="button"><i class="fa-solid fa-xmark"></i> Cancel</button>`;
+                stateEl.querySelector('.sc-db-state-edit-area').focus();
+            } else if (event.target.closest('.sc-db-state-cancel-btn')) {
+                refreshDatabaseView();
+            } else if (event.target.closest('.sc-db-state-save-btn')) {
+                const value = stateEl.querySelector('.sc-db-state-edit-area')?.value.trim() || '';
+                if (!value && !confirm('Save an empty state? This removes the newest state version.')) return;
+                editSceneState(store, value);
+                await persistMemoryDatabaseChange();
+                refreshDatabaseView();
+                toastr.success(value ? 'Current state updated.' : 'Newest state version removed.', 'Summaryception', { timeOut: TUNING.toastDefault });
+            }
+            return;
+        }
+
         const cancelButton = event.target.closest('.sc-db-snippet-cancel-btn');
         if (cancelButton) {
             refreshDatabaseView();

@@ -106,6 +106,24 @@ Merge memories_to_merge, which are older story memories, into one denser set of 
 
 Keep every durable fact, name, place, item, number, promise, decision, relationship change, and open thread. Remove only true repetition and wording that adds no information. If a later memory resolves or changes something, keep the outcome and state it clearly. Use prior_context only to understand references; do not copy it. Do not add anything absent from memories_to_merge or describe these events as the current scene.`;
 
+// Current-state record: rewritten whole after each batch, never merged by ID.
+const STATE_SYSTEM_PROMPT = 'You keep a short record of how a roleplay stands right now. Output only the record under the requested headings, with no preamble or commentary. Use only information supported by the supplied text. Write "unknown" rather than guessing.';
+
+const STATE_PROMPT = `<player_name>{{player_name}}</player_name>
+<previous_state>{{previous_state}}</previous_state>
+<earlier_memory>{{context_str}}</earlier_memory>
+<new_messages>{{story_txt}}</new_messages>
+
+Rewrite previous_state so it describes the story as it stands at the end of new_messages. earlier_memory summarizes events between previous_state and new_messages. Keep what is still true, change what changed, and drop what no longer applies or was resolved. Second-person prose refers to {{player_name}}; use the player's name.
+
+Use exactly these headings, each followed by short lines:
+Where/when:
+Present: (each character in the scene, with notable clothing, appearance, injuries or condition)
+Situation:
+Open threads: (unresolved goals, promises, dangers, plans)
+
+Stay under {{word_limit}} words.`;
+
 const defaultSettings = Object.freeze({
     enabled: true,
     verbatimTurns: 10,
@@ -134,6 +152,12 @@ const defaultSettings = Object.freeze({
 
     summarizerUserPrompt: NARRATIVE_PROMPT,
     summarizerPromotionPrompt: PROMOTION_PROMPT,  // used only when merging snippets into a deeper layer
+
+    // Current-state block (off by default): one extra short call per summarized batch.
+    stateBlockEnabled: false,
+    stateBlockTokenLimit: 250,            // most tokens of the state block injected; trimmed by whole lines
+    stateBlockPrompt: STATE_PROMPT,
+    stateBlockSystemPrompt: STATE_SYSTEM_PROMPT,
 
     promptPreset: 'narrative',
     pauseSummarization: false,  // true = stop processing, keep injecting
@@ -275,6 +299,8 @@ export {
     PROMOTION_PROMPT,
     PROMPT_PRESETS,
     RETRY_CONFIG,
+    STATE_PROMPT,
+    STATE_SYSTEM_PROMPT,
     SUMMARIZER_SYSTEM_PROMPT,
     SUPERSEDED_SYSTEM_PROMPT,
     TUNING,

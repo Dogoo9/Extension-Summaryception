@@ -167,6 +167,22 @@
                         </label>
                         <textarea id="sc_protected_names" class="text_pole sc-textarea" rows="3"></textarea>
                     </div>
+
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_state_block_enabled">
+                            <input type="checkbox" id="sc_state_block_enabled" />
+                            <span>Track current state</span>
+                        </label>
+                        <small class="sc-hint">Keeps a short record of how things stand now (where and when, who is present, the situation, open threads), injected before the summaries. Costs one extra short call per summarized batch. View, correct or update it in Memory Database.</small>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_state_block_token_limit">
+                            <span>Current state size</span>
+                            <small class="sc-hint">Most estimated tokens of state injected, inside the memory budget. Longer states lose lines from the end.</small>
+                        </label>
+                        <input id="sc_state_block_token_limit" class="text_pole" type="number" min="50" max="1000" step="10" />
+                    </div>
             </div>
 
             <!-- ═══ Summarizer connection ═══ -->
@@ -466,6 +482,21 @@
                             <small class="sc-hint">Used only when old snippets merge into a deeper layer. Same variables. Empty uses the built-in prompt.</small>
                         </label>
                         <textarea id="sc_summarizer_promotion_prompt" class="text_pole sc-textarea" rows="6"></textarea>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_state_block_prompt">
+                            <span>Current state prompt</span>
+                            <small class="sc-hint">Rewrites the current state after each batch (Memory tab). Variables: {{previous_state}}, {{context_str}} (summaries since the last state), {{story_txt}} (newest summarized messages), {{player_name}}, {{word_limit}}. Empty uses the built-in prompt.</small>
+                        </label>
+                        <textarea id="sc_state_block_prompt" class="text_pole sc-textarea" rows="8"></textarea>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_state_block_system_prompt">
+                            <span>Current state system prompt</span>
+                        </label>
+                        <textarea id="sc_state_block_system_prompt" class="text_pole sc-textarea" rows="3"></textarea>
                     </div>
 
                     <div class="sc-row">

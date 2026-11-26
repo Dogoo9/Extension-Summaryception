@@ -74,16 +74,25 @@ import {
 import {
     updateUI,
 } from './settings-ui.js';
+import {
+    updateSceneState,
+} from './scene-state.js';
 
-async function callSummarizer(storyTxt, contextStr, { extraInstructions = '', promotion = false } = {}) {
+// `template`, `systemPrompt` and `variables` let other memory records (the
+// current-state block) reuse the same connection, retry and toggle handling.
+async function callSummarizer(storyTxt, contextStr, {
+    extraInstructions = '', promotion = false, template: templateOverride = null,
+    systemPrompt: systemOverride = null, variables: extraVariables = {}, failureLabel = 'Summarization failed',
+    failureHint = 'Source messages kept for retry.',
+} = {}) {
     const s = structuredClone(getSettings());
-    const variables = { player_name: getPlayerName(), context_str: contextStr || '(none yet)', story_txt: storyTxt };
-    const template = promotion
+    const variables = { ...extraVariables, player_name: getPlayerName(), context_str: contextStr || '(none yet)', story_txt: storyTxt };
+    const template = templateOverride ?? (promotion
         ? (s.summarizerPromotionPrompt?.trim() ? s.summarizerPromotionPrompt : defaultSettings.summarizerPromotionPrompt)
-        : s.summarizerUserPrompt;
-    const prompt = template.replace(/{{(player_name|context_str|story_txt)}}/g, (_, key) => variables[key])
+        : s.summarizerUserPrompt);
+    const prompt = template.replace(/{{(\w+)}}/g, (match, key) => Object.hasOwn(variables, key) ? String(variables[key]) : match)
         + (extraInstructions ? `\n\n${extraInstructions}` : '');
-    const systemPrompt = s.summarizerSystemPrompt;
+    const systemPrompt = systemOverride ?? s.summarizerSystemPrompt;
     const defaultMode = !s.connectionSource || s.connectionSource === 'default';
     // Default mode borrows the user's live connection and prompt manager. Hold the
     // toggles disabled only while a request is in flight, never during backoff, so
@@ -142,8 +151,8 @@ async function callSummarizer(storyTxt, contextStr, { extraInstructions = '', pr
                 parent?.removeEventListener('abort', onAbort);
             }
         }
-        console.error(LOG_PREFIX, 'Summarization failed:', lastError);
-        toastr.error(`Summarization failed: ${lastError?.message || 'unknown error'}. Source messages kept for retry.`, 'Summaryception', { timeOut: TUNING.toastError });
+        console.error(LOG_PREFIX, `${failureLabel}:`, lastError);
+        toastr.error(`${failureLabel}: ${lastError?.message || 'unknown error'}. ${failureHint}`, 'Summaryception', { timeOut: TUNING.toastError });
         return '';
     } finally {
         releaseToggles();
@@ -195,7 +204,12 @@ async function maybeSummarizeTurns() {
 async function summarizeOneBatch(visibleTurns) {
     const run = beginSummarization();
     if (!run) return false;
-    try { return await summarizeOneBatchFromTurns(visibleTurns, run); }
+    try {
+        const saved = await summarizeOneBatchFromTurns(visibleTurns, run);
+        // A failed state update never undoes the saved batch.
+        if (saved && runIsCurrent(run)) await updateSceneState(run);
+        return saved;
+    }
     catch (error) {
         console.error(LOG_PREFIX, 'Batch processing failed:', error);
         toastr.error(`Could not finish saving the batch: ${error.message}. Check the active memory before continuing.`, 'Summaryception');
@@ -295,6 +309,8 @@ async function runCatchup(visibleTurns, overflow, drain = false) {
             updateUI();
             await delayWithSignal(TUNING.catchupInterBatchDelay, run.controller.signal);
         }
+        // One state update for the whole backlog, not one per batch.
+        if (completed && runIsCurrent(run)) await updateSceneState(run);
         if (targetIsCurrent(run.target)) {
             const left = unsummarizedTurns(run.target.chat, run.target.store).length - s.verbatimTurns;
             const stopped = run.controller.signal.aborted || left >= (fullOnly ? s.turnsPerSummary : 1);
@@ -515,6 +531,7 @@ async function regenerateSnippets(snippets) {
 }
 
 export {
+    callSummarizer,
     maybeSummarizeTurns,
     regenerateSnippets,
     runCatchup,

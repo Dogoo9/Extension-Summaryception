@@ -36,6 +36,9 @@ import {
 import {
     estimateTokens,
 } from './settings-ui.js';
+import {
+    sceneStateInjectionText,
+} from './scene-state.js';
 
 function getMemoryMeter() {
     const ctx = SillyTavern.getContext();
@@ -53,12 +56,17 @@ function getMemoryAssemblyOptions() {
     for (let i = store.layers.length - 1; i >= 0; i--) snippets.push(...(store.layers[i] || []));
     const deepest = store.layers.findLastIndex(layer => layer?.length);
     const canonicalCount = deepest >= 0 ? store.layers[deepest].length : 0;
+    const meter = getMemoryMeter();
+    const narrative = snippets.map((sn, order) => ({
+        text: snippetText(sn), order, pinned: Boolean(sn.pinned), canonical: order < canonicalCount,
+    }));
+    // The current-state block goes first and is chosen before any snippet.
+    const stateText = sceneStateInjectionText(store, meter);
+    if (stateText) narrative.unshift({ text: stateText, order: -1, pinned: true, state: true });
     return {
-        narrative: snippets.map((sn, order) => ({
-            text: snippetText(sn), order, pinned: Boolean(sn.pinned), canonical: order < canonicalCount,
-        })),
+        narrative,
         template: s.injectionTemplate || defaultSettings.injectionTemplate,
-        meter: getMemoryMeter(),
+        meter,
     };
 }
 
@@ -106,7 +114,7 @@ function getInjectionDebugSummary(value, position, depth, scan, role) {
 function injectionConfigurationKey() {
     const s = getSettings();
     return JSON.stringify([s.enabled, s.contextBudget, s.contextBudgetUnit, s.injectionTemplate,
-        s.injectionPosition, s.injectionDepth, s.injectionRole, s.injectionScan]);
+        s.injectionPosition, s.injectionDepth, s.injectionRole, s.injectionScan, s.stateBlockEnabled, s.stateBlockTokenLimit]);
 }
 
 function updateInjectionDebugOverlay() {
