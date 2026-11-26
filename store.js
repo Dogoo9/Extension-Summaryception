@@ -39,6 +39,7 @@ function createEmptyChatStore() {
         ghostedIndices: [],           // Track which messages WE ghosted
         sourceSignatures: [],
         archive: [],                  // Snippets merged by promotion: { ...snippet, layer, parentId, archivedAt }
+        stateHistory: [],             // Current-state block versions: { text, through, timestamp, edited? }, newest last
     };
 }
 
@@ -86,6 +87,11 @@ function normalizeChatStore(store) {
         else if (typeof entry.id !== 'string' || !entry.id) entry.id = newSnippetId();
     }
     if (typeof store.summarizedUpTo !== 'number') store.summarizedUpTo = -1;
+    if (!Array.isArray(store.stateHistory)) store.stateHistory = [];
+    for (let j = store.stateHistory.length - 1; j >= 0; j--) {
+        const entry = store.stateHistory[j];
+        if (!entry || typeof entry.text !== 'string' || !Number.isInteger(entry.through) || entry.through < -1) store.stateHistory.splice(j, 1);
+    }
     if (!Array.isArray(store.ghostedIndices)) store.ghostedIndices = [];
     // Retire fact snapshots and legacy recall metadata while preserving prose,
     // ranges, signatures, and visibility ownership from older saves/imports.
@@ -507,6 +513,7 @@ async function clearActiveMemory() {
     const store = target.store;
     store.layers = [];
     store.archive = [];
+    store.stateHistory = [];
     store.summarizedUpTo = -1;
     store.sourceSignatures = [];
     delete store.lastBatch;
@@ -541,6 +548,10 @@ function validateMemoryImport(data) {
                 && entry.turnRange.every(Number.isInteger) && entry.turnRange[0] >= 0
                 && entry.turnRange[1] >= entry.turnRange[0])) throw new Error('Invalid archived snippet source range.');
         }
+    }
+    if (store.stateHistory != null && (!Array.isArray(store.stateHistory)
+        || store.stateHistory.some(entry => !entry || typeof entry.text !== 'string' || !Number.isInteger(entry.through) || entry.through < -1))) {
+        throw new Error('Invalid current-state history.');
     }
     if (store.summarizedUpTo != null && (!Number.isInteger(store.summarizedUpTo) || store.summarizedUpTo < -1)) {
         throw new Error('Invalid summarized cutoff.');

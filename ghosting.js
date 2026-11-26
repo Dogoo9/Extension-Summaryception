@@ -239,6 +239,8 @@ function truncateMemoryStore(store, dirty) {
     store.summarizedUpTo = Math.max(store.summarizedUpTo, Math.min(skippedThrough, dirty - 1));
     store.sourceSignatures.length = Math.max(0, store.summarizedUpTo + 1);
     store.ghostedIndices = store.ghostedIndices.filter(i => i <= store.summarizedUpTo);
+    // A state version built from a changed message is dropped with it.
+    if (Array.isArray(store.stateHistory)) store.stateHistory = store.stateHistory.filter(entry => entry.through < dirty);
     invalidateContextCache(store);
     if (store.lastBatch?.range?.[1] >= dirty) delete store.lastBatch;
 }

@@ -771,3 +771,153 @@ test('memory database escapes quotes in attribute values from chat metadata', ()
     assert.equal(doc.querySelectorAll('[onmouseover]').length, 0);
     assert.ok([...doc.querySelectorAll('.sc-db-bank')].some(el => el.dataset.bankKey === key));
 });
+
+// ─── Current-state block ─────────────────────────────────────────────
+const isStateCall = request => request[2].includes('<previous_state>');
+const stateRuntime = (settings = {}) => {
+    const r = runtime({ stateBlockEnabled: true, ...settings });
+    let stateCount = 0;
+    r.respond(async (_s, _system, prompt) => prompt.includes('<previous_state>') ? `Where/when: Inn, night ${++stateCount}\nPresent: Alex, Mara\nSituation: Talking\nOpen threads: The map` : '- Summary bullet.');
+    return r;
+};
+
+test('current state is off by default and costs no extra call', async () => {
+    const r = runtime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    assert.equal(r.requests.length, 1);
+    assert.deepEqual(plain(r.api.getChatStore().stateHistory), []);
+    assert.ok(!r.api.assembleSummaryBlock().includes('current_state'));
+});
+
+test('a summarized batch rewrites the state once, and it is injected before the summaries', async () => {
+    const r = stateRuntime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    assert.equal(r.requests.length, 2);
+    const call = r.requests[1];
+    assert.ok(isStateCall(call)); assert.ok(call[1].includes('how a roleplay stands right now'));
+    assert.ok(call[2].includes('<previous_state>(none yet)</previous_state>'));
+    assert.ok(call[2].includes('Player action 0') && call[2].includes('Reply 2'));
+    assert.ok(/Stay under \d+ words/.test(call[2]));
+    const store = r.api.getChatStore();
+    assert.equal(store.stateHistory.length, 1); assert.equal(store.stateHistory[0].through, 5);
+    const block = r.api.assembleSummaryBlock();
+    assert.ok(block.indexOf('<current_state as_of_message="5">') < block.indexOf('- Summary bullet.'));
+    assert.ok(block.includes('Messages after it take precedence'));
+});
+
+test('the next batch starts from the previous state, and a hand edit carries forward', async () => {
+    const r = stateRuntime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    r.api.editSceneState(r.api.getChatStore(), 'Where/when: Corrected by hand');
+    assert.equal(r.api.getChatStore().stateHistory.at(-1).edited, true);
+    r.addTurns(3, 5);
+    await r.api.maybeSummarizeTurns();
+    const last = r.requests.filter(isStateCall).at(-1)[2];
+    assert.ok(last.includes('<previous_state>Where/when: Corrected by hand</previous_state>'));
+    assert.ok(!last.includes('Player action 0'), 'only the new batch is sent as messages');
+    assert.equal(r.api.getChatStore().stateHistory.length, 2);
+});
+
+test('a backlog catch-up updates the state once, with earlier batches as memory', async () => {
+    const r = stateRuntime(); r.addTurns(11);
+    await r.api.runCatchup(r.api.getAssistantTurns(r.ctx.chat), 9);
+    const stateCalls = r.requests.filter(isStateCall);
+    assert.equal(stateCalls.length, 1);
+    assert.equal(r.requests.length, 4);
+    const prompt = stateCalls[0][2];
+    assert.ok(/<earlier_memory>- Summary bullet.\n- Summary bullet.<\/earlier_memory>/.test(prompt));
+    assert.ok(prompt.includes('Reply 8') && !prompt.includes('Reply 5'));
+    assert.equal(r.api.getChatStore().stateHistory.at(-1).through, r.api.getChatStore().summarizedUpTo);
+});
+
+test('a failed state update keeps the saved batch and its hidden messages', async () => {
+    const r = runtime({ stateBlockEnabled: true }); r.addTurns(5);
+    r.respond(async (_s, _system, prompt) => {
+        if (prompt.includes('<previous_state>')) { const error = new Error('Bad request'); error.status = 400; throw error; }
+        return '- Summary bullet.';
+    });
+    await r.api.maybeSummarizeTurns();
+    const store = r.api.getChatStore();
+    assert.equal(store.layers[0].length, 1); assert.equal(store.summarizedUpTo, 5);
+    assert.deepEqual(hiddenIndices(r), [0, 1, 2, 3, 4, 5]);
+    assert.deepEqual(plain(store.stateHistory), []);
+    assert.ok(r.messages.some(m => m.type === 'error' && m.text.startsWith('Current-state update failed')));
+});
+
+test('editing a source message drops only the state versions built from it', async () => {
+    const r = stateRuntime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    r.addTurns(3, 5); await r.api.maybeSummarizeTurns();
+    const store = r.api.getChatStore();
+    assert.deepEqual(plain(store.stateHistory.map(e => e.through)), [5, 11]);
+    r.ctx.chat[8].mes = 'Edited';
+    assert.equal(r.api.reconcileMemorySources(8), true);
+    assert.deepEqual(plain(store.stateHistory.map(e => e.through)), [5]);
+    r.ctx.chat[2].mes = 'Edited';
+    r.api.reconcileMemorySources(2);
+    assert.deepEqual(plain(store.stateHistory), []);
+});
+
+test('clear memory removes the state', async () => {
+    const r = stateRuntime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    await r.api.clearActiveMemory();
+    assert.deepEqual(plain(r.api.getChatStore().stateHistory), []);
+});
+
+test('the injected state is trimmed by whole lines and is not counted as an omitted snippet', () => {
+    const r = runtime({ stateBlockEnabled: true, stateBlockTokenLimit: 60 });
+    const store = r.api.getChatStore();
+    store.layers = [[{ text: '- Bullet', turnRange: [0, 1] }]]; store.summarizedUpTo = 1;
+    store.stateHistory = [{ text: Array.from({ length: 12 }, (_, i) => `Line ${i} ${'x'.repeat(30)}`).join('\n'), through: 1 }];
+    const block = r.api.assembleSummaryBlock();
+    assert.ok(block.includes('Line 0') && !block.includes('Line 11'));
+    const options = r.api.getMemoryAssemblyOptions();
+    assert.equal(options.narrative.filter(item => item.state).length, 1);
+    r.api.getSettings().stateBlockEnabled = false;
+    assert.ok(!r.api.assembleSummaryBlock().includes('current_state'));
+});
+
+test('Update Now rebuilds the state from existing summaries', async () => {
+    const r = runtime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    Object.assign(r.api.getSettings(), { stateBlockEnabled: true });
+    r.respond(async () => 'Where/when: Rebuilt');
+    assert.equal(await r.api.refreshSceneState(), true);
+    assert.equal(r.api.getChatStore().stateHistory.at(-1).text, 'Where/when: Rebuilt');
+    assert.equal(await r.api.refreshSceneState(), true, 'refresh works even when nothing new was summarized');
+    assert.ok(r.requests.at(-1)[2].includes('<previous_state>Where/when: Rebuilt</previous_state>'));
+});
+
+test('state history survives import and malformed history is rejected', () => {
+    const r = runtime();
+    const ok = r.api.validateMemoryImport({ layers: [[{ text: 'A', turnRange: [0, 1] }]], stateHistory: [{ text: 'Where/when: Inn', through: 1 }] });
+    assert.equal(ok.stateHistory[0].text, 'Where/when: Inn');
+    assert.throws(() => r.api.validateMemoryImport({ layers: [], stateHistory: [{ text: 5, through: 1 }] }), /current-state/);
+});
+
+test('each character card bank keeps its own state', async () => {
+    const r = stateRuntime({ separateMemoryByCharacterCard: true }); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    assert.equal(r.api.getChatStore().stateHistory.length, 1);
+    r.ctx.characterId = 1; r.ctx.name2 = 'Ivo';
+    assert.equal(r.api.getChatStore().stateHistory.length, 0);
+});
+
+test('memory database shows, edits and escapes the state', async () => {
+    const r = stateRuntime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    r.api.editSceneState(r.api.getChatStore(), 'Where/when: <b>Inn</b>');
+    r.api.showMemoryDatabaseModal();
+    const doc = r.dom.window.document;
+    const stateEl = doc.querySelector('.sc-db-state');
+    assert.ok(stateEl.textContent.includes('as of message 5'));
+    assert.equal(stateEl.querySelector('b'), null);
+    stateEl.querySelector('.sc-db-state-edit-btn').click();
+    await wait(0);
+    doc.querySelector('.sc-db-state-edit-area').value = 'Where/when: Market';
+    doc.querySelector('.sc-db-state-save-btn').click();
+    await wait(0);
+    assert.equal(r.api.getChatStore().stateHistory.at(-1).text, 'Where/when: Market');
+    doc.querySelector('.sc-db-overlay')?.scClose?.();
+});

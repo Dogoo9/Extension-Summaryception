@@ -160,6 +160,10 @@ function registerSlashCommands() {
                 lines.push(`Injection: ${INJECTION_POSITION_LABELS[s.injectionPosition] || 'Prompt'}${s.injectionPosition === 'in_chat' ? ` at depth ${getInjectionDepthValue(s)}` : ''} as ${s.injectionRole || 'system'}`);
                 lines.push(`Injected chars: ${(SillyTavern.getContext().extensionPrompts?.[MODULE_NAME]?.value || '').length}`);
                 lines.push(`Summarized up to index: ${store.summarizedUpTo}`);
+                if (s.stateBlockEnabled) {
+                    const latest = store.stateHistory?.at(-1);
+                    lines.push(`Current state: ${latest ? `as of message ${latest.through}${latest.edited ? ' (edited)' : ''}` : 'none yet'}`);
+                }
                 if (store.layers) {
                     for (let i = 0; i < store.layers.length; i++) {
                         const l = store.layers[i];

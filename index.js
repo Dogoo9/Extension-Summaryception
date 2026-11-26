@@ -16,6 +16,7 @@
  *   run.js             run lifecycle, cancellation and stale-result guards
  *   prompt-toggles.js  prompt-manager toggles for default-connection requests
  *   summarize.js       summarizer calls, batching, catch-up and layer promotion
+ *   scene-state.js     current-state block: rewritten after each batch, versioned for rollback
  *   injection.js       budgeted memory block and setExtensionPrompt registration
  *   events.js          SillyTavern event handlers and slash commands
  *   memory-db-ui.js    memory database viewer, bank export, legacy bank cleanup

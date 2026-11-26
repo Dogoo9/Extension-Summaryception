@@ -132,6 +132,27 @@ Summaryception never deletes your messages. Summarized turns are **ghosted** —
 
 ---
 
+## 🧭 Current State (optional)
+
+Turn on **Track current state** (Memory tab) to keep a short record of how things stand right now, next to the layered summaries:
+
+```
+Where/when: The Gilded Inn, late evening
+Present: Alex (cloak torn, left arm bandaged); Mara (travel clothes, uneasy)
+Situation: Negotiating with the innkeeper for a room
+Open threads: The stolen map; Mara's promise to meet her brother at dawn
+```
+
+- **Rewritten whole after each summarized batch** by one extra short summarizer call: the previous record plus what was just summarized. It is never updated per reply, and a backlog catch-up updates it once at the end. Nothing is merged or tracked by ID, so a poor update is simply replaced by the next one.
+- **As of the last summarized message.** The block says so, and that later messages take precedence. Those later messages are still in the chat verbatim.
+- **Injected first, inside the memory budget**, with its own size cap (**Current state size**, default 250 estimated tokens). A longer state loses lines from the end.
+- **Rolls back with your chat.** Each memory bank keeps its last 6 versions, each tagged with the last message it covers. Editing, swiping or deleting an older message drops the versions built from it. If none are left, the block is empty until the next batch. Clear Memory removes it.
+- **Correct it by hand** in Memory Database (**Edit State**). The next update starts from your text. **Update Now** rebuilds it immediately, for example after turning the feature on in an existing chat.
+- A failed state update never affects the saved summaries or hidden messages.
+- Off by default. The headings live in the **Current state prompt** (Prompts tab), which you can edit.
+
+---
+
 ## 🧹 Summarizer Prompt Isolation
 
 Direct HTTP sources send only the summary prompts. Default uses SillyTavern's raw generation path; if a prompt manager is exposed, its toggles are restored after the request. Connection Profile requests use the supported numeric token-limit argument and disable creative preset/instruct formatting while retaining the profile's endpoint, model, and credentials.
@@ -299,7 +320,7 @@ Enable **Advanced Settings → Show Injection Debug Overlay** when debugging. Th
 
 ### Validation
 
-Run `npm ci` then `npm test` (Node.js 22 or newer). The suite covers request cancellation, saved backlog progress, atomic regeneration, source edits and card/chat switches, preset/custom prompts, overlay escaping and updates, legacy migration, message hiding ownership (stale index lists, failed unhides, clearing mid-hide, rollback display), whole-snippet budgets, tokenization/settings races, and connection timeout cleanup. Model responses are mocked; this does not establish real-model summary quality or validate a live SillyTavern installation.
+Run `npm ci` then `npm test` (Node.js 22 or newer). The suite covers request cancellation, saved backlog progress, atomic regeneration, source edits and card/chat switches, preset/custom prompts, overlay escaping and updates, legacy migration, the current-state block (updates, rollback, trimming, editing), message hiding ownership (stale index lists, failed unhides, clearing mid-hide, rollback display), whole-snippet budgets, tokenization/settings races, and connection timeout cleanup. Model responses are mocked; this does not establish real-model summary quality or validate a live SillyTavern installation.
 
 The extension is a set of ES modules; `index.js` lists what each file holds. Shared mutable runtime state (the run lock, abort controller, chat epoch and similar) lives on the single `state` object in `state.js`, because a module cannot reassign another module's bindings. `tests/runtime-helper.js` evaluates the modules as one script in dependency order so tests can reach internals, and `tests/modules.test.js` loads the real module graph so a missing export fails the suite. When adding a module, add it to both lists.
 
