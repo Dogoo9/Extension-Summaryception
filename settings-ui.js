@@ -39,6 +39,7 @@ import {
 import {
     ghostMessagesUpTo,
     reconcileMemorySources,
+    releaseStaleGhosts,
     repairIfBranched,
     unghostAllMessages,
 } from './ghosting.js';
@@ -358,8 +359,7 @@ function bindUIEvents() {
         s.separateMemoryByCharacterCard = $(this).prop('checked');
         saveSettings();
         await activateCharacterMemoryStore();
-        updateInjection();
-        updateUI();
+        await persistMemoryDatabaseChange();
         toastr.info(
             s.separateMemoryByCharacterCard
                 ? 'Character-card memory separation enabled for this chat. The active card now has its own memory bank.'
@@ -503,18 +503,12 @@ function bindUIEvents() {
     $('#sc_repair').on('click', async function () {
         abortSummarization();
         await repairIfBranched();
-        const { chat } = SillyTavern.getContext();
-        const store = getChatStore();
-        const covered = new Set(store.ghostedIndices);
         const target = captureMemoryTarget();
-        for (let i = 0; i < chat.length && targetIsCurrent(target); i++) {
-            if (chat[i]?.extra?.sc_ghosted && (!covered.has(i) || i > store.summarizedUpTo)) {
-                await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${i}`, { showOutput: false });
-                delete chat[i].extra.sc_ghosted;
-            }
-        }
+        const store = target.store;
+        const end = getSettings().enabled ? store.summarizedUpTo : -1;
+        await releaseStaleGhosts(getSummarizedRangeStart(store), end, target);
         if (!targetIsCurrent(target)) return;
-        await ghostMessagesUpTo(store.summarizedUpTo, getSummarizedRangeStart(store));
+        if (end >= 0) await ghostMessagesUpTo(end, getSummarizedRangeStart(store), target);
         await persistMemoryDatabaseChange();
         toastr.success('Summaryception-owned visibility repaired. Manually hidden messages preserved.', 'Summaryception');
     });

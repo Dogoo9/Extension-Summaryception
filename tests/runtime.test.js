@@ -681,3 +681,81 @@ test('settings tabs show one panel at a time and remember the last one', async (
     r.api.getSettings().activeTab = 'gone'; r.api.updateUI();
     assert.deepEqual(visible(), ['timing'], 'an unknown saved tab falls back to the first');
 });
+
+const hiddenIndices = r => r.ctx.chat.flatMap((m, i) => m.is_system ? [i] : []);
+const flaggedIndices = r => r.ctx.chat.flatMap((m, i) => m.extra?.sc_ghosted ? [i] : []);
+
+test('summarized messages are hidden with one range command per contiguous run', async () => {
+    const r = runtime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    assert.deepEqual(r.hides, ['/hide 0-5']);
+    await r.api.clearActiveMemory();
+    assert.deepEqual(r.hides, ['/hide 0-5', '/unhide 0-5']);
+});
+
+test('clear unhides every flagged message even when the saved index list is stale', async () => {
+    const r = runtime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    r.api.getChatStore().ghostedIndices = [0, 1, 2];
+    await r.api.clearActiveMemory();
+    assert.deepEqual(hiddenIndices(r), []); assert.deepEqual(flaggedIndices(r), []);
+    assert.deepEqual(plain(r.api.getChatStore().ghostedIndices), []);
+});
+
+test('a failed unhide keeps the message owned so a later clear finishes it', async () => {
+    const r = runtime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    const original = r.ctx.executeSlashCommandsWithOptions;
+    r.ctx.executeSlashCommandsWithOptions = async command => {
+        if (command === '/unhide 0-5' || command === '/unhide 0') throw new Error('busy');
+        return original(command);
+    };
+    await r.api.clearActiveMemory();
+    assert.deepEqual(hiddenIndices(r), [0]); assert.deepEqual(flaggedIndices(r), [0]);
+    assert.ok(r.messages.some(m => m.type === 'warning' && m.text.includes('could not be unhidden')));
+    r.ctx.executeSlashCommandsWithOptions = original;
+    await r.api.clearActiveMemory();
+    assert.deepEqual(hiddenIndices(r), []); assert.deepEqual(flaggedIndices(r), []);
+});
+
+test('source repair unhides rolled-back messages in the rendered chat too', async () => {
+    const r = runtime(); r.addTurns(5);
+    await r.api.maybeSummarizeTurns();
+    const doc = r.dom.window.document;
+    const chatEl = doc.createElement('div'); chatEl.id = 'chat'; doc.body.append(chatEl);
+    for (let i = 0; i < r.ctx.chat.length; i++) chatEl.insertAdjacentHTML('beforeend', `<div class="mes" mesid="${i}" is_system="${r.ctx.chat[i].is_system}"></div>`);
+    r.ctx.chat[3].mes = 'Edited';
+    assert.equal(r.api.reconcileMemorySources(3), true);
+    assert.deepEqual(hiddenIndices(r), []); assert.deepEqual(flaggedIndices(r), []);
+    assert.equal(doc.querySelectorAll('#chat .mes[is_system="true"]').length, 0);
+});
+
+test('clearing while messages are being hidden leaves nothing hidden', async () => {
+    const r = runtime(); r.addTurns(5);
+    const original = r.ctx.executeSlashCommandsWithOptions;
+    const gate = deferred(); let reached;
+    const atHide = new Promise(resolve => { reached = resolve; });
+    r.ctx.executeSlashCommandsWithOptions = async command => {
+        if (command.startsWith('/hide')) { reached(); await gate.promise; }
+        return original(command);
+    };
+    const work = r.api.maybeSummarizeTurns();
+    await atHide;
+    const clearing = r.api.clearActiveMemory();
+    gate.resolve();
+    await clearing; await work;
+    assert.deepEqual(hiddenIndices(r), []); assert.deepEqual(flaggedIndices(r), []);
+    assert.deepEqual(plain(r.api.getChatStore().ghostedIndices), []);
+});
+
+test('clear asks about the backlog again instead of silently re-hiding old messages', async () => {
+    const r = runtime({ turnsPerSummary: 1 }); r.addTurns(8);
+    const doc = r.dom.window.document;
+    let dialog = r.api.maybeSummarizeTurns();
+    doc.getElementById('sc_catchup_skip').click(); await dialog;
+    await r.api.clearActiveMemory();
+    dialog = r.api.maybeSummarizeTurns();
+    assert.ok(doc.getElementById('sc_catchup_cancel'), 'backlog dialog is shown again');
+    doc.getElementById('sc_catchup_cancel').click(); await dialog;
+    assert.deepEqual(hiddenIndices(r), []); assert.equal(r.requests.length, 0);
+});
